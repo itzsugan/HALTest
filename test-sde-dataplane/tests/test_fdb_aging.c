@@ -266,7 +266,7 @@ TEST(test_aging_start_stop)
     /* Verify stopped (may take a moment) */
     usleep(100000);  /* 100ms */
     running = hal_fdb_aging_is_running();
-    ASSERT_FALSE(running);
+    ASSERT_EQ(running, 0);
 }
 
 
