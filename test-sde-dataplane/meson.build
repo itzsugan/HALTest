@@ -94,12 +94,12 @@ test_fdb_aging = executable('test_fdb_aging',
 
 test('fdb_aging_basic', test_fdb_aging,
     args: ['--basic'],
-    timeout: 600,
+    timeout: 60,
 )
 
 test('fdb_aging_bulk', test_fdb_aging,
     args: ['--bulk'],
-    timeout: 600,
+    timeout: 60,
 )
 
 
