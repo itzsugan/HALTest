@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <time.h>
 
 /* ============================================================================
  * Internal Data Structures
@@ -627,17 +628,31 @@ hal_status_t hal_fdb_age_callback_register(hal_fdb_age_cb_t callback,
         return HAL_E_NULL;
     }
 
-    /* TODO: Implement callback registration
-     *
-     * Requirements:
-     * - Store callback and context in g_fdb_callbacks array
-     * - Support up to FDB_MAX_AGE_CALLBACKS callbacks
-     * - Return HAL_E_FULL if array is full
-     * - Use g_fdb_callback_lock for thread safety
-     */
+    if (!hal_is_initialized()) {
+        return HAL_E_INIT;
+    }
 
-    (void)context;
-    return HAL_E_NOT_IMPL;
+	pthread_mutex_lock(&g_fdb_callback_lock);
+
+	for (int i = 0; i < g_fdb_callback_count; i++) {
+		if (g_fdb_callbacks[i].callback == callback) {
+			pthread_mutex_unlock(&g_fdb_callback_lock);
+			return HAL_E_EXISTS;
+		}
+	}
+
+	if (g_fdb_callback_count >= FDB_MAX_AGE_CALLBACKS) {
+		pthread_mutex_unlock(&g_fdb_callback_lock);
+		return HAL_E_FULL;
+	}
+    /* Add new callback to array */
+    g_fdb_callbacks[g_fdb_callback_count].callback = callback;
+    g_fdb_callbacks[g_fdb_callback_count].context = context;
+    g_fdb_callback_count++;
+
+	pthread_mutex_unlock(&g_fdb_callback_lock);
+
+    return HAL_SUCCESS;
 }
 
 hal_status_t hal_fdb_age_callback_unregister(hal_fdb_age_cb_t callback)
@@ -646,29 +661,44 @@ hal_status_t hal_fdb_age_callback_unregister(hal_fdb_age_cb_t callback)
         return HAL_E_NULL;
     }
 
-    /* TODO: Implement callback unregistration
-     *
-     * Requirements:
-     * - Find and remove callback from g_fdb_callbacks array
-     * - Return HAL_E_NOT_FOUND if callback not registered
-     * - Use g_fdb_callback_lock for thread safety
-     */
+    if (!hal_is_initialized()) {
+        return HAL_E_INIT;
+    }
 
-    return HAL_E_NOT_IMPL;
+	pthread_mutex_lock(&g_fdb_callback_lock);
+
+    /* Find and remove callback */
+    for (int i = 0; i < g_fdb_callback_count; i++) {
+        if (g_fdb_callbacks[i].callback == callback) {
+            /* Shift remaining callbacks down to free up last index */
+            for (int j = i; j < g_fdb_callback_count - 1; j++) {
+                g_fdb_callbacks[j] = g_fdb_callbacks[j + 1];
+            }
+            g_fdb_callback_count--;
+
+            pthread_mutex_unlock(&g_fdb_callback_lock);
+            return HAL_SUCCESS;
+        }
+    }
+
+	pthread_mutex_unlock(&g_fdb_callback_lock);
+    return HAL_E_NOT_FOUND;
 }
 
 hal_status_t hal_fdb_aging_set(uint32_t aging_time_sec)
 {
-    /* TODO: Implement aging time configuration
-     *
-     * Requirements:
-     * - Store aging_time_sec in g_fdb_aging.aging_time_sec
-     * - Value of 0 disables aging
-     * - Use appropriate locking
-     */
+    if (!hal_is_initialized()) {
+        return HAL_E_INIT;
+    }
 
-    (void)aging_time_sec;
-    return HAL_E_NOT_IMPL;
+    pthread_mutex_lock(&g_fdb_aging.mutex);
+    g_fdb_aging.aging_time_sec = aging_time_sec;
+    
+    /* Signal thread to apply new configuration */
+    pthread_cond_signal(&g_fdb_aging.cond);
+    
+    pthread_mutex_unlock(&g_fdb_aging.mutex);
+    return HAL_SUCCESS;
 }
 
 hal_status_t hal_fdb_aging_get(uint32_t *aging_time_sec)
@@ -677,14 +707,15 @@ hal_status_t hal_fdb_aging_get(uint32_t *aging_time_sec)
         return HAL_E_NULL;
     }
 
-    /* TODO: Implement aging time query
-     *
-     * Requirements:
-     * - Return current g_fdb_aging.aging_time_sec
-     * - Use appropriate locking
-     */
+    if (!hal_is_initialized()) {
+        return HAL_E_INIT;
+    }
 
-    return HAL_E_NOT_IMPL;
+    pthread_mutex_lock(&g_fdb_aging.mutex);
+    *aging_time_sec = g_fdb_aging.aging_time_sec;
+    pthread_mutex_unlock(&g_fdb_aging.mutex);
+
+    return HAL_SUCCESS;
 }
 
 hal_status_t hal_fdb_aging_interval_set(uint32_t interval_sec)
@@ -693,16 +724,18 @@ hal_status_t hal_fdb_aging_interval_set(uint32_t interval_sec)
         return HAL_E_PARAM;
     }
 
-    /* TODO: Implement scan interval configuration
-     *
-     * Requirements:
-     * - Store interval_sec in g_fdb_aging.scan_interval_sec
-     * - Wake up aging thread if it's waiting (so it uses new interval)
-     * - Use appropriate locking
-     */
+    if (!hal_is_initialized()) {
+        return HAL_E_INIT;
+    }
 
-    (void)interval_sec;
-    return HAL_E_NOT_IMPL;
+    pthread_mutex_lock(&g_fdb_aging.mutex);
+    g_fdb_aging.scan_interval_sec = interval_sec;
+    
+    /* Signal thread */
+    pthread_cond_signal(&g_fdb_aging.cond);
+    
+    pthread_mutex_unlock(&g_fdb_aging.mutex);
+    return HAL_SUCCESS;
 }
 
 hal_status_t hal_fdb_aging_interval_get(uint32_t *interval_sec)
@@ -711,40 +744,49 @@ hal_status_t hal_fdb_aging_interval_get(uint32_t *interval_sec)
         return HAL_E_NULL;
     }
 
-    /* TODO: Implement scan interval query */
+    if (!hal_is_initialized()) {
+        return HAL_E_INIT;
+    }
 
-    return HAL_E_NOT_IMPL;
+    pthread_mutex_lock(&g_fdb_aging.mutex);
+    *interval_sec = g_fdb_aging.scan_interval_sec;
+    pthread_mutex_unlock(&g_fdb_aging.mutex);
+
+    return HAL_SUCCESS;
 }
 
 hal_status_t hal_fdb_aging_start(void)
 {
-    /* TODO: Implement aging thread startup
-     *
-     * Requirements:
-     * - Create a background thread that periodically scans the FDB table
-     * - The thread should:
-     *   1. Sleep for scan_interval_sec seconds (use condition variable)
-     *   2. Scan all entries in g_fdb_table
-     *   3. For each entry where age > aging_time_sec and not static:
-     *      a. Invoke all registered callbacks
-     *      b. Delete the entry from ASIC and software table
-     *   4. Handle HAL_FLAG_HIT bit:
-     *      - If HIT is set, clear it and reset the entry's last_update
-     *      - If HIT is not set, entry continues to age
-     *   5. Repeat until stopped
-     *
-     * Thread Safety:
-     * - Use pthread_create to start the thread
-     * - Store thread handle in g_fdb_aging.thread
-     * - Set g_fdb_aging.running = true
-     * - Use g_fdb_aging.mutex and g_fdb_aging.cond for coordination
-     *
-     * Error Handling:
-     * - Return HAL_E_EXISTS if already running
-     * - Return HAL_E_FAIL if thread creation fails
-     */
+    if (!hal_is_initialized()) {
+        return HAL_E_INIT;
+    }
 
-    return HAL_E_NOT_IMPL;
+    pthread_mutex_lock(&g_fdb_aging.mutex);
+
+    /* Check if aging thread already running */
+    if (g_fdb_aging.running) {
+        pthread_mutex_unlock(&g_fdb_aging.mutex);
+        return HAL_E_EXISTS;
+    }
+
+    /* Set running flag */
+    g_fdb_aging.running = true;
+
+    /* Create the aging thread */
+    int ret = pthread_create(&g_fdb_aging.thread,
+                            NULL,
+                            hal_fdb_aging_thread_main,
+                            NULL);
+
+    if (ret != 0) {
+        /* Aging thread creation failed */
+        g_fdb_aging.running = false;
+        pthread_mutex_unlock(&g_fdb_aging.mutex);
+        return HAL_E_FAIL;
+    }
+
+    pthread_mutex_unlock(&g_fdb_aging.mutex);
+    return HAL_SUCCESS;
 }
 
 hal_status_t hal_fdb_aging_stop(void)
@@ -761,11 +803,230 @@ hal_status_t hal_fdb_aging_stop(void)
      * - Handle case where aging is not running (return success)
      */
 
+    if (!hal_is_initialized()) {
+        return HAL_E_INIT;
+    }
+
+    pthread_mutex_lock(&g_fdb_aging.mutex);
+
+    /* If not running, nothing to do */
+    if (!g_fdb_aging.running) {
+        pthread_mutex_unlock(&g_fdb_aging.mutex);
+        return HAL_SUCCESS;
+    }
+
+    /* Signal thread to stop */
+    g_fdb_aging.running = false;
+    pthread_cond_signal(&g_fdb_aging.cond);
+
+    pthread_mutex_unlock(&g_fdb_aging.mutex);
+
+    /* Wait for thread to exit */
+    void *ret_val = NULL;
+    pthread_join(g_fdb_aging.thread, &ret_val);
+
     return HAL_SUCCESS;  /* Safe to call even if not running */
 }
 
 bool hal_fdb_aging_is_running(void)
 {
-    /* TODO: Return current running state */
-    return false;
+    if (!hal_is_initialized()) {
+        return false;
+    }
+
+    pthread_mutex_lock(&g_fdb_aging.mutex);
+    bool running = g_fdb_aging.running;
+    pthread_mutex_unlock(&g_fdb_aging.mutex);
+
+    return running;
 }
+
+
+
+static void *hal_fdb_aging_thread_main(void *arg)
+{
+	struct timespec timeout;
+	int scan_interval_sec;
+	bool should_stop = false;
+
+	(void) arg;
+	
+	while (1)
+	{
+		pthread_mutex_lock(&g_fdb_aging.mutex);
+
+        /* Get current scan interval */
+        scan_interval_sec = g_fdb_aging.scan_interval_sec;
+
+        /* Calculate sleep time */
+        clock_gettime(CLOCK_REALTIME, &timeout);
+        timeout.tv_sec += scan_interval_sec;
+
+        /* Wait for timeout/signal */
+        int ret = pthread_cond_timedwait(&g_fdb_aging.cond,
+                                        &g_fdb_aging.mutex,
+                                        &timeout);
+
+        /* Check for stop signal */
+        if (!g_fdb_aging.running) {
+            pthread_mutex_unlock(&g_fdb_aging.mutex);
+            break;
+        }
+		
+		/* if aging disabled, continue */
+		if (g_fdb_aging.aging_time_sec == 0) {
+			pthread_mutex_unlock(&g_fdb_aging.mutex);
+            continue;
+		}
+      
+        pthread_mutex_unlock(&g_fdb_aging.mutex);
+
+        /* Perform aging scan */
+        hal_fdb_perform_aging_scan();
+	}
+}
+
+
+static hal_status_t hal_fdb_clear_hit_bit_and_reset_age(hal_fdb_entry_t *entry)
+{
+	/* Clear HIT bit in asic */
+	hal_status_t status = asic_l2_hit_clear(hal_unit_default(),
+										   entry->object_id);
+	if (status != HAL_SUCCESS) {
+		/* Log error but continue with other entries */
+		return status;
+	}
+
+    pthread_rwlock_wrlock(&g_fdb_table.lock);
+
+	/* Refresh entry in SW table. */
+	fdb_sw_entry_t *e = fdb_find_entry(entry->mac, entry->vlan_id);
+	if (e && e->valid) {
+		e->last_update = hal_time_now();
+		e->entry.age = 0;
+	}
+
+    pthread_rwlock_unlock(&g_fdb_table.lock);
+	
+	return HAL_SUCCESS;
+}
+
+
+static hal_status_t hal_fdb_delete_without_lock(hal_fdb_entry_t *entry)
+{
+    uint32_t hash = fdb_hash (entry->mac, entry->vlan_id);
+    fdb_sw_entry_t *e = g_fdb_table.buckets[hash];
+    fdb_sw_entry_t *prev = NULL;
+
+    while (e) {
+        if (e->valid &&
+            HAL_MAC_EQUAL(e->entry.mac, entry->mac) &&
+            e->entry.vlan_id == entry->vlan_id) {
+
+            /* Delete from ASIC */
+            hal_status_t rv = asic_l2_delete(hal_unit_default(),
+                                             e->entry.object_id);
+            if (rv != HAL_SUCCESS && rv != HAL_E_NOT_FOUND) {
+                return rv;
+            }
+
+            /* Remove from chain */
+            if (prev) {
+                prev->next = e->next;
+            } else {
+                g_fdb_table.buckets[hash] = e->next;
+            }
+
+            g_fdb_table.count--;
+            if (e->entry.flags & HAL_FLAG_STATIC) {
+                g_fdb_table.static_count--;
+            }
+
+            free(e);
+            return HAL_SUCCESS;
+        }
+        prev = e;
+        e = e->next;
+    }
+
+    return HAL_E_NOT_FOUND;
+}
+
+
+
+static void hal_fdb_perform_aging_scan(void)
+{
+    hal_fdb_entry_t to_reset[FDB_HASH_SIZE];
+    hal_fdb_entry_t to_delete[FDB_HASH_SIZE];
+    int to_reset_count = 0;
+    int to_delete_count = 0;
+	
+    hal_time_us_t now = hal_time_now();
+	uint32_t aging_time_sec;
+
+    pthread_mutex_lock(&g_fdb_aging.mutex);
+    aging_time_sec = g_fdb_aging.aging_time_sec;
+    pthread_mutex_unlock(&g_fdb_aging.mutex);
+
+    // Scan phase (read lock)
+    pthread_rwlock_rdlock(&g_fdb_table.lock);
+
+    for (int i = 0; i < FDB_HASH_SIZE; i++) {
+        fdb_sw_entry_t *e = g_fdb_table.buckets[i];
+        while (e) {
+			hal_fdb_entry_t entry = e->entry;
+
+            if ((!e->valid) || (entry.flags & HAL_FLAG_STATIC)) {
+                e = e->next;
+                continue;
+            }
+
+			/* Calculate current age */
+			entry.age = (uint32_t)((now - e->last_update) / 1000000);
+
+			if (entry.flags & HAL_FLAG_HIT) {
+				// Mark for reset (don't modify while holding read lock)
+				to_reset[to_reset_count++] = entry;
+			} else if (entry.age > aging_time_sec) {
+				to_delete[to_delete_count] = entry;
+			}
+
+            e = e->next;
+        }
+    }
+    pthread_rwlock_unlock(&g_fdb_table.lock);
+
+    // Process resets (need write lock for each)
+    for (int i = 0; i < to_reset_count; i++) {
+        hal_fdb_clear_hit_bit_and_reset_age(&to_reset[i]);
+	}
+
+	/* Table snapshot of callbacks */
+    pthread_mutex_lock(&g_fdb_callback_lock);
+    int callback_count = g_fdb_callback_count;
+    fdb_age_callback_t callbacks[FDB_MAX_AGE_CALLBACKS];
+    
+    /* Snapshot callbacks (copy while holding lock) */
+    for (int i = 0; i < callback_count; i++) {
+        callbacks[i] = g_fdb_callbacks[i];
+    }
+    pthread_mutex_unlock(&g_fdb_callback_lock);
+
+    // Invoke callbacks (no lock held!)
+    for (int i = 0; i < to_delete_count; i++) {
+        for (int j = 0; j < callback_count; j++) {
+            if (callbacks[j].callback) {
+                callbacks[j].callback(&to_delete[i], callbacks[j].context);
+            }
+        }
+    }
+
+    // Delete phase (write lock)
+    pthread_rwlock_wrlock(&g_fdb_table.lock);
+    for (int i = 0; i < to_delete_count; i++) {        
+        hal_fdb_delete_without_lock(&to_delete[i]);
+	}
+    pthread_rwlock_unlock(&g_fdb_table.lock);
+
+}
+
