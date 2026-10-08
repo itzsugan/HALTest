@@ -252,7 +252,7 @@ static void hal_fdb_perform_aging_scan(void)
 				// Mark for reset (don't modify while holding read lock)
 				to_reset[to_reset_count++] = entry;
 			} else if (entry.age > aging_time_sec) {
-				to_delete[to_delete_count] = entry;
+				to_delete[to_delete_count++] = entry;
 			}
 
             e = e->next;

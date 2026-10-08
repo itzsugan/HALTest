@@ -91,6 +91,42 @@ static void test_age_callback_alt(const hal_fdb_entry_t *entry, void *context)
     callback_tracker.invocation_count++;
 }
 
+/* Dummy callback to test 8 max */
+static void dummy_callback1(const hal_fdb_entry_t *entry, void *context)
+{
+    (void)entry;
+    (void)context;
+}
+static void dummy_callback2(const hal_fdb_entry_t *entry, void *context)
+{
+    (void)entry;
+    (void)context;
+}
+static void dummy_callback3(const hal_fdb_entry_t *entry, void *context)
+{
+    (void)entry;
+    (void)context;
+}
+static void dummy_callback4(const hal_fdb_entry_t *entry, void *context)
+{
+    (void)entry;
+    (void)context;
+}
+static void dummy_callback5(const hal_fdb_entry_t *entry, void *context)
+{
+    (void)entry;
+    (void)context;
+}
+static void dummy_callback6(const hal_fdb_entry_t *entry, void *context)
+{
+    (void)entry;
+    (void)context;
+}
+static void dummy_callback7(const hal_fdb_entry_t *entry, void *context)
+{
+    (void)entry;
+    (void)context;
+}
 
 /* ============================================================================
  * Basic CRUD Tests
@@ -157,15 +193,16 @@ TEST(test_callback_register_full)
     reset_tracker();
     
     /* Create 8 different callback functions (using function pointers) */
-    hal_fdb_age_cb_t callbacks[8] = {
+    hal_fdb_age_cb_t callbacks[9] = {
         test_age_callback,
         test_age_callback_alt,
-        test_age_callback,  /* Duplicate not allowed */
-        test_age_callback_alt,
-        test_age_callback,
-        test_age_callback_alt,
-        test_age_callback,
-        test_age_callback_alt,
+        dummy_callback1,
+        dummy_callback2,
+        dummy_callback3,
+        dummy_callback4,
+        dummy_callback5,
+        dummy_callback6,
+        dummy_callback7
     };
     
     /* Try to register more callbacks than max (should fail) */
@@ -178,10 +215,12 @@ TEST(test_callback_register_full)
             registered++;
         }
     }
-    
-    /* At least one should succeed, but not all (due to duplicates/full) */
-    ASSERT(registered > 0);
-    
+    ASSERT(registered == 8);
+
+	/* Register 9th callback. */
+	hal_status_t status = hal_fdb_age_callback_register(callbacks[8], NULL);
+    ASSERT_NE(status, HAL_SUCCESS);
+
     /* Cleanup */
     hal_fdb_age_callback_unregister(test_age_callback);
     hal_fdb_age_callback_unregister(test_age_callback_alt);
@@ -273,15 +312,12 @@ TEST(test_aging_start_stop)
     hal_status_t status = hal_fdb_aging_start();
     ASSERT_EQ(status, HAL_SUCCESS);
     
-    /* Verify running */
     bool running = hal_fdb_aging_is_running();
     ASSERT(running);
     
-    /* Stop aging thread */
     status = hal_fdb_aging_stop();
     ASSERT_EQ(status, HAL_SUCCESS);
     
-    /* Verify stopped (may take a moment) */
     usleep(100000);  /* 100ms */
     running = hal_fdb_aging_is_running();
     ASSERT_EQ(running, 0);
@@ -320,12 +356,11 @@ TEST(test_aging_start_stop_start)
     status = hal_fdb_aging_stop();
     ASSERT_EQ(status, HAL_SUCCESS);
     
-    usleep(100000);  /* Allow cleanup */
+    usleep(100000);
     
     status = hal_fdb_aging_start();
     ASSERT_EQ(status, HAL_SUCCESS);
     
-    /* Cleanup */
     hal_fdb_aging_stop();
 }
 
@@ -341,17 +376,16 @@ TEST(test_aging_dynamic_entry)
      */
     
     /* Setup: Start aging with short timeout */
-    hal_fdb_aging_set(2);  /* 2 second aging timeout */
-    hal_fdb_aging_interval_set(1);  /* 1 second scan interval */
+    hal_fdb_aging_set(2);
+    hal_fdb_aging_interval_set(1);
     hal_fdb_aging_start();
     
-    usleep(100000);  /* Let thread start */
+    usleep(100000);
     
     /* Add dynamic entry */
     hal_fdb_entry_t entry = make_fdb_entry(0x01, 100, 1);
     hal_fdb_add(&entry);
     
-    /* Verify entry was added */
     hal_fdb_entry_t retrieved = {0};
     hal_status_t status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
     ASSERT_EQ(status, HAL_SUCCESS);
@@ -359,11 +393,9 @@ TEST(test_aging_dynamic_entry)
     /* Wait for aging (2 sec timeout + 1 sec scan interval + margin) */
     sleep(4);
     
-    /* Entry should be deleted by aging thread */
     status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
-    ASSERT_NE(status, HAL_SUCCESS);  /* Entry not found */
+    ASSERT_NE(status, HAL_SUCCESS);
     
-    /* Cleanup */
     hal_fdb_aging_stop();
     hal_fdb_aging_set(300);  /* Reset to default */
     hal_fdb_aging_interval_set(10);
@@ -376,24 +408,21 @@ TEST(test_aging_static_entry)
      * Static entries should NEVER age out
      */
     
-    /* Setup: Start aging with short timeout */
     hal_fdb_aging_set(2);
     hal_fdb_aging_interval_set(1);
     hal_fdb_aging_start();
     
-    usleep(100000);  /* Let thread start */
+    usleep(100000);
     
     /* Add STATIC entry */
     hal_fdb_entry_t entry = make_fdb_entry(0x02, 100, 1);
     entry.flags |= HAL_FLAG_STATIC;
     hal_fdb_add(&entry);
     
-    /* Verify entry was added */
     hal_fdb_entry_t retrieved = {0};
     hal_status_t status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
     ASSERT_EQ(status, HAL_SUCCESS);
     
-    /* Wait longer than aging timeout */
     sleep(4);
     
     /* Entry should still exist (static) */
@@ -401,10 +430,8 @@ TEST(test_aging_static_entry)
     ASSERT_EQ(status, HAL_SUCCESS);
     ASSERT(retrieved.flags & HAL_FLAG_STATIC);
     
-    /* Manual cleanup */
     hal_fdb_delete(entry.mac, entry.vlan_id);
     
-    /* Thread cleanup */
     hal_fdb_aging_stop();
     hal_fdb_aging_set(300);
     hal_fdb_aging_interval_set(10);
@@ -422,11 +449,9 @@ TEST(test_aging_disabled)
     
     usleep(100000);
     
-    /* Add dynamic entry */
     hal_fdb_entry_t entry = make_fdb_entry(0x03, 100, 1);
     hal_fdb_add(&entry);
     
-    /* Wait */
     sleep(3);
     
     /* Entry should still exist (aging disabled) */
@@ -434,10 +459,8 @@ TEST(test_aging_disabled)
     hal_status_t status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
     ASSERT_EQ(status, HAL_SUCCESS);
     
-    /* Manual cleanup */
     hal_fdb_delete(entry.mac, entry.vlan_id);
     
-    /* Thread cleanup */
     hal_fdb_aging_stop();
     hal_fdb_aging_set(300);
 }
@@ -453,25 +476,20 @@ TEST(test_callback_invoked_on_aging)
     
     reset_tracker();
     
-    /* Register callback */
     int callback_count = 0;
     hal_fdb_age_callback_register(test_age_callback, &callback_count);
     
-    /* Setup: Start aging with short timeout */
     hal_fdb_aging_set(2);
     hal_fdb_aging_interval_set(1);
     hal_fdb_aging_start();
     
     usleep(100000);
     
-    /* Add dynamic entry */
     hal_fdb_entry_t entry = make_fdb_entry(0x04, 100, 1);
     hal_fdb_add(&entry);
     
-    /* Wait for aging */
     sleep(4);
     
-    /* Callback should have been invoked */
     ASSERT(callback_tracker.invoked);
     ASSERT(callback_tracker.invocation_count > 0);
     
@@ -479,7 +497,6 @@ TEST(test_callback_invoked_on_aging)
     ASSERT(HAL_MAC_EQUAL(callback_tracker.last_entry.mac, entry.mac));
     ASSERT_EQ(callback_tracker.last_entry.vlan_id, entry.vlan_id);
     
-    /* Cleanup */
     hal_fdb_aging_stop();
     hal_fdb_age_callback_unregister(test_age_callback);
     hal_fdb_aging_set(300);
@@ -493,28 +510,23 @@ TEST(test_multiple_callbacks_invoked)
     
     reset_tracker();
     
-    /* Register two callbacks */
     hal_fdb_age_callback_register(test_age_callback, NULL);
     hal_fdb_age_callback_register(test_age_callback_alt, NULL);
     
-    /* Setup: Start aging */
     hal_fdb_aging_set(2);
     hal_fdb_aging_interval_set(1);
     hal_fdb_aging_start();
     
     usleep(100000);
     
-    /* Add entry */
     hal_fdb_entry_t entry = make_fdb_entry(0x05, 100, 1);
     hal_fdb_add(&entry);
     
-    /* Wait for aging */
     sleep(4);
     
     /* Callback count should reflect both callbacks being invoked */
     ASSERT(callback_tracker.invocation_count >= 1);
     
-    /* Cleanup */
     hal_fdb_aging_stop();
     hal_fdb_age_callback_unregister(test_age_callback);
     hal_fdb_age_callback_unregister(test_age_callback_alt);
@@ -535,32 +547,28 @@ TEST(test_hit_bit_prevents_aging)
     hal_fdb_aging_set(2);
     hal_fdb_aging_interval_set(1);
     hal_fdb_aging_start();
-    
+
     usleep(100000);
-    
+
     /* Add entry and simulate HIT */
     hal_fdb_entry_t entry = make_fdb_entry(0x06, 100, 1);
     hal_fdb_add(&entry);
-    
-    /* Set HIT flag to indicate recent access */
+
     entry.flags |= HAL_FLAG_HIT;
     hal_fdb_update(&entry);
-    
-    /* Wait for scan interval (thread should clear HIT, not age entry) */
+
     sleep(2);
-    
+
     /* Entry should still exist (HIT prevented aging) */
     hal_fdb_entry_t retrieved = {0};
     hal_status_t status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
     ASSERT_EQ(status, HAL_SUCCESS);
-    
+
     /* HIT bit should be cleared after scan */
     ASSERT_EQ(retrieved.flags & HAL_FLAG_HIT, 0);
-    
-    /* Manual cleanup */
+
     hal_fdb_delete(entry.mac, entry.vlan_id);
     
-    /* Thread cleanup */
     hal_fdb_aging_stop();
     hal_fdb_aging_set(300);
     hal_fdb_aging_interval_set(10);
@@ -577,22 +585,17 @@ TEST(test_empty_table_aging)
     
     reset_tracker();
     
-    /* Make sure FDB is empty */
     hal_fdb_flush_dynamic();
     
-    /* Start aging */
     hal_fdb_aging_set(2);
     hal_fdb_aging_interval_set(1);
     hal_fdb_aging_start();
     
-    /* Wait for scans */
     sleep(3);
     
-    /* Should complete without error */
     bool running = hal_fdb_aging_is_running();
     ASSERT(running);
     
-    /* Cleanup */
     hal_fdb_aging_stop();
     hal_fdb_aging_set(300);
     hal_fdb_aging_interval_set(10);
@@ -603,33 +606,92 @@ TEST(test_config_change_during_aging)
 {
     /* Changing configuration while aging is running should work */
     
-    /* Start aging */
     hal_fdb_aging_set(300);
     hal_fdb_aging_interval_set(10);
     hal_fdb_aging_start();
     
     usleep(100000);
     
-    /* Change configuration */
     hal_status_t status = hal_fdb_aging_set(120);
     ASSERT_EQ(status, HAL_SUCCESS);
     
     status = hal_fdb_aging_interval_set(5);
     ASSERT_EQ(status, HAL_SUCCESS);
     
-    /* Verify changes took effect */
     uint32_t aging_time = 0, interval = 0;
     hal_fdb_aging_get(&aging_time);
     hal_fdb_aging_interval_get(&interval);
     ASSERT_EQ(aging_time, 120);
     ASSERT_EQ(interval, 5);
     
-    /* Cleanup */
     hal_fdb_aging_stop();
     hal_fdb_aging_set(300);
     hal_fdb_aging_interval_set(10);
 }
 
+TEST(test_concurrent_add_during_aging)
+{
+    /* Verify adding entries during aging scan doesn't crash or deadlock */
+    
+    /* Setup: Enable aging with short intervals */
+    hal_fdb_aging_set(2);
+    hal_fdb_aging_interval_set(1);
+    hal_fdb_aging_start();
+    
+    usleep(100000);
+    
+    /* Add multiple entries while aging runs */
+    for (int i = 0; i < 10; i++) {
+        hal_fdb_entry_t entry = make_fdb_entry(0x20 + i, 100, 1);
+        hal_status_t status = hal_fdb_add(&entry);
+        
+        ASSERT_EQ(status, HAL_SUCCESS);
+        
+        usleep(150000);
+    }
+    
+    bool running = hal_fdb_aging_is_running();
+    ASSERT(running);
+    
+    hal_fdb_aging_stop();
+    hal_fdb_aging_set(300);
+    hal_fdb_aging_interval_set(10);
+}
+
+
+TEST(test_concurrent_delete_during_aging)
+{
+    /* Verify deleting entries during aging scan doesn't crash or deadlock */
+    
+    /* Setup: Enable aging */
+    hal_fdb_aging_set(5);
+    hal_fdb_aging_interval_set(1);
+    hal_fdb_aging_start();
+    
+    usleep(100000);
+    
+    hal_fdb_entry_t entries[10];
+    for (int i = 0; i < 10; i++) {
+        entries[i] = make_fdb_entry(0x30 + i, 100, 1);
+        hal_fdb_add(&entries[i]);
+    }
+    
+    usleep(100000);
+    
+    for (int i = 0; i < 10; i++) {
+        hal_status_t status = hal_fdb_delete(entries[i].mac, entries[i].vlan_id);
+        
+        ASSERT(status == HAL_SUCCESS || status == HAL_E_NOT_FOUND);
+        
+        usleep(100000);
+    }
+    
+    bool running = hal_fdb_aging_is_running();
+    ASSERT(running);
+    
+    hal_fdb_aging_stop();
+    hal_fdb_aging_set(300);
+}
 
 /* ============================================================================
  * Main
@@ -665,13 +727,6 @@ static void run_basic_tests(void)
     RUN_TEST_WITH_FIXTURE(test_aging_static_entry);
     RUN_TEST_WITH_FIXTURE(test_aging_disabled);
 
-    /* Callback Tests */
-    RUN_TEST_WITH_FIXTURE(test_callback_invoked_on_aging);
-    RUN_TEST_WITH_FIXTURE(test_multiple_callbacks_invoked);
-
-    /* HIT Bit Tests */
-    RUN_TEST_WITH_FIXTURE(test_hit_bit_prevents_aging);
-
     TEST_SUITE_END();
 }
 
@@ -679,9 +734,20 @@ static void run_bulk_tests(void)
 {
     TEST_SUITE_BEGIN("FDB Aging Bulk Tests");
 
+    /* Callback Tests */
+    RUN_TEST_WITH_FIXTURE(test_callback_invoked_on_aging);
+    RUN_TEST_WITH_FIXTURE(test_multiple_callbacks_invoked);
+
+    /* HIT Bit Tests */
+    RUN_TEST_WITH_FIXTURE(test_hit_bit_prevents_aging);
+
     /* Edge Cases */
     RUN_TEST_WITH_FIXTURE(test_empty_table_aging);
     RUN_TEST_WITH_FIXTURE(test_config_change_during_aging);
+
+    /* Concurrency Cases */
+    RUN_TEST_WITH_FIXTURE(test_concurrent_add_during_aging);
+    RUN_TEST_WITH_FIXTURE(test_concurrent_delete_during_aging);
 
     TEST_SUITE_END();
 }
