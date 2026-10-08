@@ -381,7 +381,7 @@ TEST(test_aging_static_entry)
     /* Entry should still exist (static) */
     status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
     ASSERT_EQ(status, HAL_SUCCESS);
-    ASSERT_EQ((retrieved.flags & HAL_FLAG_STATIC) == HAL_FLAG_STATIC);
+    ASSERT(retrieved.flags & HAL_FLAG_STATIC);
     
     /* Manual cleanup */
     hal_fdb_delete(entry.mac, entry.vlan_id);
@@ -537,7 +537,7 @@ TEST(test_hit_bit_prevents_aging)
     ASSERT_EQ(status, HAL_SUCCESS);
     
     /* HIT bit should be cleared after scan */
-    ASSERT_FALSE(retrieved.flags & HAL_FLAG_HIT);
+    ASSERT_EQ(retrieved.flags & HAL_FLAG_HIT, 0);
     
     /* Manual cleanup */
     hal_fdb_delete(entry.mac, entry.vlan_id);
