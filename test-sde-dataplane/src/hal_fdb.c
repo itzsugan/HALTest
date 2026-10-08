@@ -224,6 +224,7 @@ static void hal_fdb_perform_aging_scan(void)
     hal_fdb_entry_t to_delete[FDB_HASH_SIZE];
     int to_reset_count = 0;
     int to_delete_count = 0;
+	int count = 0;
 	
     hal_time_us_t now = hal_time_now();
 	uint32_t aging_time_sec;
@@ -238,6 +239,7 @@ static void hal_fdb_perform_aging_scan(void)
     for (int i = 0; i < FDB_HASH_SIZE; i++) {
         fdb_sw_entry_t *e = g_fdb_table.buckets[i];
         while (e) {
+			count++;
 			hal_fdb_entry_t entry = e->entry;
 
             if ((!e->valid) || (entry.flags & HAL_FLAG_STATIC)) {
@@ -257,6 +259,7 @@ static void hal_fdb_perform_aging_scan(void)
 
             e = e->next;
         }
+		if (count >= g_fdb_table.count) break; // if already processed all entries, break.
     }
     pthread_rwlock_unlock(&g_fdb_table.lock);
 
@@ -984,17 +987,6 @@ hal_status_t hal_fdb_aging_start(void)
 
 hal_status_t hal_fdb_aging_stop(void)
 {
-    /* TODO: Implement aging thread shutdown
-     *
-     * Requirements:
-     * - Signal the aging thread to stop
-     * - Wait for thread to exit (pthread_join)
-     * - Set g_fdb_aging.running = false
-     *
-     * Thread Safety:
-     * - Use g_fdb_aging.cond to wake up sleeping thread
-     * - Handle case where aging is not running (return success)
-     */
 
     if (!hal_is_initialized()) {
         return HAL_E_INIT;

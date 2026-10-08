@@ -1,0 +1,23 @@
+
+[-] Locking strategy
+	- Separate lock/mutex are already used/defined in the code.
+	- Lock is released before calling external functions to enable flexibility to callbacks to invoke HAL APIs.
+	- Appropriate lock is used based on operation minimizes hold time and handles race conditions gracefully.
+	- In Aging logic, the usage of RW lock and phase wise operation (i.e. scan, reset and delete) enables concurrent FDB get/add/delete operations perform smoothly.
+	  Due to this, during the aging process, HAl is still responsive to config changes and FDB add/delete operations irrespective of scale.
+
+
+[-] Snapshot for callback invocation
+	- Unregistration of callback can be done during ageout invocation
+	- Snapshot ensure all callbacks in one aging cycle sees same entry list
+	- Tradeoff:
+		- Minimal copy overhead around 256 bytes per cycle.
+
+[-] Tradeoffs
+	- Signaling aging process whenever there is a timer config change can cause longer ageout time if aging time change is frequent.
+	- Stack arrays sized to `FDB_HASH_SIZE` (4096 entries) is used to store the reset/delete entries temporarily causes stack memory overhead during scans.
+	  Having dynamic allocation based on the available entries will use less memory.
+	  Chosen stack arrays to reduce complexity of allocation/deallocation handlings, but not appropriate for production code.
+
+
+
