@@ -14,6 +14,24 @@
 #include <string.h>
 
 /* ============================================================================
+ * Test Fixtures
+ * ============================================================================ */
+
+static hal_config_t test_config;
+
+TEST_SETUP()
+{
+    hal_config_init(&test_config);
+    test_config.asic_latency_us = 0;  /* Disable latency for faster tests */
+    hal_init(&test_config);
+}
+
+TEST_TEARDOWN()
+{
+    hal_shutdown();
+}
+
+/* ============================================================================
  * Helper Functions
  * ============================================================================ */
 
