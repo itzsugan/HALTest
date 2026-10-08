@@ -86,7 +86,7 @@ TEST(test_callback_register_single)
 {
     reset_tracker();
     hal_status_t status = hal_fdb_age_callback_register(test_age_callback, NULL);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* Cleanup */
     hal_fdb_age_callback_unregister(test_age_callback);
@@ -97,7 +97,7 @@ TEST(test_callback_register_null)
 {
     /* Registering NULL callback should fail */
     hal_status_t status = hal_fdb_age_callback_register(NULL, NULL);
-    ASSERT_NOT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_NE(status, HAL_SUCCESS);
 }
 
 
@@ -107,7 +107,7 @@ TEST(test_callback_register_duplicate)
     reset_tracker();
     hal_fdb_age_callback_register(test_age_callback, NULL);
     hal_status_t status = hal_fdb_age_callback_register(test_age_callback, NULL);
-    ASSERT_NOT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_NE(status, HAL_SUCCESS);
     
     /* Cleanup */
     hal_fdb_age_callback_unregister(test_age_callback);
@@ -121,10 +121,10 @@ TEST(test_callback_register_multiple)
     for (int i = 0; i < 5; i++) {
         hal_status_t status = hal_fdb_age_callback_register(test_age_callback, NULL);
         if (i == 0) {
-            ASSERT_EQUALS(status, HAL_SUCCESS);
+            ASSERT_EQ(status, HAL_SUCCESS);
         } else {
             /* Subsequent registrations should fail (duplicate) */
-            ASSERT_NOT_EQUALS(status, HAL_SUCCESS);
+            ASSERT_NE(status, HAL_SUCCESS);
         }
     }
     
@@ -162,7 +162,7 @@ TEST(test_callback_register_full)
     }
     
     /* At least one should succeed, but not all (due to duplicates/full) */
-    ASSERT_TRUE(registered > 0);
+    ASSERT(registered > 0);
     
     /* Cleanup */
     hal_fdb_age_callback_unregister(test_age_callback);
@@ -174,7 +174,7 @@ TEST(test_callback_unregister_not_found)
 {
     /* Unregistering non-existent callback should fail */
     hal_status_t status = hal_fdb_age_callback_unregister(test_age_callback);
-    ASSERT_NOT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_NE(status, HAL_SUCCESS);
 }
 
 
@@ -186,12 +186,12 @@ TEST(test_aging_set_get)
 {
     /* Set aging time and verify */
     hal_status_t status = hal_fdb_aging_set(120);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     uint32_t aging_time = 0;
     status = hal_fdb_aging_get(&aging_time);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
-    ASSERT_EQUALS(aging_time, 120);
+    ASSERT_EQ(status, HAL_SUCCESS);
+    ASSERT_EQ(aging_time, 120);
     
     /* Reset to default */
     hal_fdb_aging_set(300);
@@ -202,11 +202,11 @@ TEST(test_aging_set_zero)
 {
     /* Setting aging time to 0 disables aging */
     hal_status_t status = hal_fdb_aging_set(0);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     uint32_t aging_time = 0;
     hal_fdb_aging_get(&aging_time);
-    ASSERT_EQUALS(aging_time, 0);
+    ASSERT_EQ(aging_time, 0);
     
     /* Reset to default */
     hal_fdb_aging_set(300);
@@ -217,12 +217,12 @@ TEST(test_interval_set_get)
 {
     /* Set scan interval and verify */
     hal_status_t status = hal_fdb_aging_interval_set(20);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     uint32_t interval = 0;
     status = hal_fdb_aging_interval_get(&interval);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
-    ASSERT_EQUALS(interval, 20);
+    ASSERT_EQ(status, HAL_SUCCESS);
+    ASSERT_EQ(interval, 20);
     
     /* Reset to default */
     hal_fdb_aging_interval_set(10);
@@ -233,7 +233,7 @@ TEST(test_interval_set_zero)
 {
     /* Setting interval to 0 should fail */
     hal_status_t status = hal_fdb_aging_interval_set(0);
-    ASSERT_NOT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_NE(status, HAL_SUCCESS);
 }
 
 
@@ -241,7 +241,7 @@ TEST(test_aging_get_null)
 {
     /* Getting aging time with NULL pointer should fail */
     hal_status_t status = hal_fdb_aging_get(NULL);
-    ASSERT_NOT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_NE(status, HAL_SUCCESS);
 }
 
 
@@ -253,15 +253,15 @@ TEST(test_aging_start_stop)
 {
     /* Start aging thread */
     hal_status_t status = hal_fdb_aging_start();
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* Verify running */
     bool running = hal_fdb_aging_is_running();
-    ASSERT_TRUE(running);
+    ASSERT(running);
     
     /* Stop aging thread */
     status = hal_fdb_aging_stop();
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* Verify stopped (may take a moment) */
     usleep(100000);  /* 100ms */
@@ -274,11 +274,11 @@ TEST(test_aging_start_double)
 {
     /* Start aging thread first time */
     hal_status_t status = hal_fdb_aging_start();
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* Second start should return error */
     status = hal_fdb_aging_start();
-    ASSERT_NOT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_NE(status, HAL_SUCCESS);
     
     /* Cleanup */
     hal_fdb_aging_stop();
@@ -289,7 +289,7 @@ TEST(test_aging_stop_not_running)
 {
     /* Stop should succeed even if not running */
     hal_status_t status = hal_fdb_aging_stop();
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
 }
 
 
@@ -297,15 +297,15 @@ TEST(test_aging_start_stop_start)
 {
     /* Start, stop, start sequence */
     hal_status_t status = hal_fdb_aging_start();
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     status = hal_fdb_aging_stop();
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     usleep(100000);  /* Allow cleanup */
     
     status = hal_fdb_aging_start();
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* Cleanup */
     hal_fdb_aging_stop();
@@ -336,14 +336,14 @@ TEST(test_aging_dynamic_entry)
     /* Verify entry was added */
     hal_fdb_entry_t retrieved = {0};
     hal_status_t status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* Wait for aging (2 sec timeout + 1 sec scan interval + margin) */
     sleep(4);
     
     /* Entry should be deleted by aging thread */
     status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
-    ASSERT_NOT_EQUALS(status, HAL_SUCCESS);  /* Entry not found */
+    ASSERT_NE(status, HAL_SUCCESS);  /* Entry not found */
     
     /* Cleanup */
     hal_fdb_aging_stop();
@@ -373,15 +373,15 @@ TEST(test_aging_static_entry)
     /* Verify entry was added */
     hal_fdb_entry_t retrieved = {0};
     hal_status_t status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* Wait longer than aging timeout */
     sleep(4);
     
     /* Entry should still exist (static) */
     status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
-    ASSERT_TRUE(retrieved.flags & HAL_FLAG_STATIC);
+    ASSERT_EQ(status, HAL_SUCCESS);
+    ASSERT_EQ((retrieved.flags & HAL_FLAG_STATIC) == HAL_FLAG_STATIC);
     
     /* Manual cleanup */
     hal_fdb_delete(entry.mac, entry.vlan_id);
@@ -414,7 +414,7 @@ TEST(test_aging_disabled)
     /* Entry should still exist (aging disabled) */
     hal_fdb_entry_t retrieved = {0};
     hal_status_t status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* Manual cleanup */
     hal_fdb_delete(entry.mac, entry.vlan_id);
@@ -454,12 +454,12 @@ TEST(test_callback_invoked_on_aging)
     sleep(4);
     
     /* Callback should have been invoked */
-    ASSERT_TRUE(callback_tracker.invoked);
-    ASSERT_TRUE(callback_tracker.invocation_count > 0);
+    ASSERT(callback_tracker.invoked);
+    ASSERT(callback_tracker.invocation_count > 0);
     
     /* Verify callback received correct entry data */
-    ASSERT_TRUE(HAL_MAC_EQUAL(callback_tracker.last_entry.mac, entry.mac));
-    ASSERT_EQUALS(callback_tracker.last_entry.vlan_id, entry.vlan_id);
+    ASSERT(HAL_MAC_EQUAL(callback_tracker.last_entry.mac, entry.mac));
+    ASSERT_EQ(callback_tracker.last_entry.vlan_id, entry.vlan_id);
     
     /* Cleanup */
     hal_fdb_aging_stop();
@@ -494,7 +494,7 @@ TEST(test_multiple_callbacks_invoked)
     sleep(4);
     
     /* Callback count should reflect both callbacks being invoked */
-    ASSERT_TRUE(callback_tracker.invocation_count >= 1);
+    ASSERT(callback_tracker.invocation_count >= 1);
     
     /* Cleanup */
     hal_fdb_aging_stop();
@@ -534,7 +534,7 @@ TEST(test_hit_bit_prevents_aging)
     /* Entry should still exist (HIT prevented aging) */
     hal_fdb_entry_t retrieved = {0};
     hal_status_t status = hal_fdb_get(entry.mac, entry.vlan_id, &retrieved);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* HIT bit should be cleared after scan */
     ASSERT_FALSE(retrieved.flags & HAL_FLAG_HIT);
@@ -572,7 +572,7 @@ TEST(test_empty_table_aging)
     
     /* Should complete without error */
     bool running = hal_fdb_aging_is_running();
-    ASSERT_TRUE(running);
+    ASSERT(running);
     
     /* Cleanup */
     hal_fdb_aging_stop();
@@ -594,17 +594,17 @@ TEST(test_config_change_during_aging)
     
     /* Change configuration */
     hal_status_t status = hal_fdb_aging_set(120);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     status = hal_fdb_aging_interval_set(5);
-    ASSERT_EQUALS(status, HAL_SUCCESS);
+    ASSERT_EQ(status, HAL_SUCCESS);
     
     /* Verify changes took effect */
     uint32_t aging_time = 0, interval = 0;
     hal_fdb_aging_get(&aging_time);
     hal_fdb_aging_interval_get(&interval);
-    ASSERT_EQUALS(aging_time, 120);
-    ASSERT_EQUALS(interval, 5);
+    ASSERT_EQ(aging_time, 120);
+    ASSERT_EQ(interval, 5);
     
     /* Cleanup */
     hal_fdb_aging_stop();
