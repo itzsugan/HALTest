@@ -50,7 +50,6 @@ hal_sources = files(
     'src/hal_fdb.c',
     'src/hal_route.c',
     'src/hal_resource.c',
-    'src/hal_txn.c',
 )
 
 hal_lib = static_library('hal',
@@ -103,6 +102,7 @@ test('fdb_aging_bulk', test_fdb_aging,
     timeout: 60,
 )
 
+
 # Route Tests
 test_route = executable('test_route',
     'tests/test_route.c',
@@ -131,19 +131,6 @@ test_integration = executable('test_integration',
 
 test('integration', test_integration,
     timeout: 60,
-)
-
-# Transaction Manager Tests
-test_txn = executable('test_txn',
-    'tests/test_txn.c',
-    include_directories: test_inc_dirs,
-    link_with: [hal_lib, asic_lib],
-    dependencies: [thread_dep],
-)
-
-test('txn_basic', test_txn,
-    args: ['--basic'],
-    timeout: 30,
 )
 
 # =============================================================================
