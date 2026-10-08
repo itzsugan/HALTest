@@ -132,6 +132,198 @@ static hal_status_t fdb_init(void)
     return HAL_SUCCESS;
 }
 
+
+
+static hal_status_t hal_fdb_clear_hit_bit_and_reset_age(hal_fdb_entry_t *entry)
+{
+	/* Clear HIT bit in asic */
+	hal_status_t status = asic_l2_hit_clear(hal_unit_default(),
+										   entry->object_id);
+	if (status != HAL_SUCCESS) {
+		/* Log error but continue with other entries */
+		return status;
+	}
+
+    pthread_rwlock_wrlock(&g_fdb_table.lock);
+
+	/* Refresh entry in SW table. */
+	fdb_sw_entry_t *e = fdb_find_entry(entry->mac, entry->vlan_id);
+	if (e && e->valid) {
+		e->last_update = hal_time_now();
+		e->entry.age = 0;
+	}
+
+    pthread_rwlock_unlock(&g_fdb_table.lock);
+	
+	return HAL_SUCCESS;
+}
+
+
+static hal_status_t hal_fdb_delete_without_lock(hal_fdb_entry_t *entry)
+{
+    uint32_t hash = fdb_hash (entry->mac, entry->vlan_id);
+    fdb_sw_entry_t *e = g_fdb_table.buckets[hash];
+    fdb_sw_entry_t *prev = NULL;
+
+    while (e) {
+        if (e->valid &&
+            HAL_MAC_EQUAL(e->entry.mac, entry->mac) &&
+            e->entry.vlan_id == entry->vlan_id) {
+
+            /* Delete from ASIC */
+            hal_status_t rv = asic_l2_delete(hal_unit_default(),
+                                             e->entry.object_id);
+            if (rv != HAL_SUCCESS && rv != HAL_E_NOT_FOUND) {
+                return rv;
+            }
+
+            /* Remove from chain */
+            if (prev) {
+                prev->next = e->next;
+            } else {
+                g_fdb_table.buckets[hash] = e->next;
+            }
+
+            g_fdb_table.count--;
+            if (e->entry.flags & HAL_FLAG_STATIC) {
+                g_fdb_table.static_count--;
+            }
+
+            free(e);
+            return HAL_SUCCESS;
+        }
+        prev = e;
+        e = e->next;
+    }
+
+    return HAL_E_NOT_FOUND;
+}
+
+
+/* FDB Aging Scan Function (called from hal_fdb_aging_thread_main) */
+static void hal_fdb_perform_aging_scan(void)
+{
+    hal_fdb_entry_t to_reset[FDB_HASH_SIZE];
+    hal_fdb_entry_t to_delete[FDB_HASH_SIZE];
+    int to_reset_count = 0;
+    int to_delete_count = 0;
+	
+    hal_time_us_t now = hal_time_now();
+	uint32_t aging_time_sec;
+
+    pthread_mutex_lock(&g_fdb_aging.mutex);
+    aging_time_sec = g_fdb_aging.aging_time_sec;
+    pthread_mutex_unlock(&g_fdb_aging.mutex);
+
+    // Scan phase (read lock)
+    pthread_rwlock_rdlock(&g_fdb_table.lock);
+
+    for (int i = 0; i < FDB_HASH_SIZE; i++) {
+        fdb_sw_entry_t *e = g_fdb_table.buckets[i];
+        while (e) {
+			hal_fdb_entry_t entry = e->entry;
+
+            if ((!e->valid) || (entry.flags & HAL_FLAG_STATIC)) {
+                e = e->next;
+                continue;
+            }
+
+			/* Calculate current age */
+			entry.age = (uint32_t)((now - e->last_update) / 1000000);
+
+			if (entry.flags & HAL_FLAG_HIT) {
+				// Mark for reset (don't modify while holding read lock)
+				to_reset[to_reset_count++] = entry;
+			} else if (entry.age > aging_time_sec) {
+				to_delete[to_delete_count] = entry;
+			}
+
+            e = e->next;
+        }
+    }
+    pthread_rwlock_unlock(&g_fdb_table.lock);
+
+    // Process resets (need write lock for each)
+    for (int i = 0; i < to_reset_count; i++) {
+        hal_fdb_clear_hit_bit_and_reset_age(&to_reset[i]);
+	}
+
+	/* Table snapshot of callbacks */
+    pthread_mutex_lock(&g_fdb_callback_lock);
+    int callback_count = g_fdb_callback_count;
+    fdb_age_callback_t callbacks[FDB_MAX_AGE_CALLBACKS];
+    
+    /* Snapshot callbacks (copy while holding lock) */
+    for (int i = 0; i < callback_count; i++) {
+        callbacks[i] = g_fdb_callbacks[i];
+    }
+    pthread_mutex_unlock(&g_fdb_callback_lock);
+
+    // Invoke callbacks (no lock held!)
+    for (int i = 0; i < to_delete_count; i++) {
+        for (int j = 0; j < callback_count; j++) {
+            if (callbacks[j].callback) {
+                callbacks[j].callback(&to_delete[i], callbacks[j].context);
+            }
+        }
+    }
+
+    // Delete phase (write lock)
+    pthread_rwlock_wrlock(&g_fdb_table.lock);
+    for (int i = 0; i < to_delete_count; i++) {        
+        hal_fdb_delete_without_lock(&to_delete[i]);
+	}
+    pthread_rwlock_unlock(&g_fdb_table.lock);
+
+}
+
+
+/* FDB Aging Main (called from hal_fdb_aging_start) */
+static void *hal_fdb_aging_thread_main(void *arg)
+{
+	struct timespec timeout;
+	int scan_interval_sec;
+	bool should_stop = false;
+
+	(void) arg;
+	
+	while (1)
+	{
+		pthread_mutex_lock(&g_fdb_aging.mutex);
+
+        /* Get current scan interval */
+        scan_interval_sec = g_fdb_aging.scan_interval_sec;
+
+        /* Calculate sleep time */
+        clock_gettime(CLOCK_REALTIME, &timeout);
+        timeout.tv_sec += scan_interval_sec;
+
+        /* Wait for timeout/signal */
+        int ret = pthread_cond_timedwait(&g_fdb_aging.cond,
+                                        &g_fdb_aging.mutex,
+                                        &timeout);
+
+        /* Check for stop signal */
+        if (!g_fdb_aging.running) {
+            pthread_mutex_unlock(&g_fdb_aging.mutex);
+            break;
+        }
+		
+		/* if aging disabled, continue */
+		if (g_fdb_aging.aging_time_sec == 0) {
+			pthread_mutex_unlock(&g_fdb_aging.mutex);
+            continue;
+		}
+      
+        pthread_mutex_unlock(&g_fdb_aging.mutex);
+
+        /* Perform aging scan */
+        hal_fdb_perform_aging_scan();
+	}
+}
+
+
+
 /* Shutdown FDB subsystem - called from hal_shutdown() */
 void hal_fdb_shutdown(void)
 {
@@ -839,194 +1031,5 @@ bool hal_fdb_aging_is_running(void)
     pthread_mutex_unlock(&g_fdb_aging.mutex);
 
     return running;
-}
-
-
-
-static void *hal_fdb_aging_thread_main(void *arg)
-{
-	struct timespec timeout;
-	int scan_interval_sec;
-	bool should_stop = false;
-
-	(void) arg;
-	
-	while (1)
-	{
-		pthread_mutex_lock(&g_fdb_aging.mutex);
-
-        /* Get current scan interval */
-        scan_interval_sec = g_fdb_aging.scan_interval_sec;
-
-        /* Calculate sleep time */
-        clock_gettime(CLOCK_REALTIME, &timeout);
-        timeout.tv_sec += scan_interval_sec;
-
-        /* Wait for timeout/signal */
-        int ret = pthread_cond_timedwait(&g_fdb_aging.cond,
-                                        &g_fdb_aging.mutex,
-                                        &timeout);
-
-        /* Check for stop signal */
-        if (!g_fdb_aging.running) {
-            pthread_mutex_unlock(&g_fdb_aging.mutex);
-            break;
-        }
-		
-		/* if aging disabled, continue */
-		if (g_fdb_aging.aging_time_sec == 0) {
-			pthread_mutex_unlock(&g_fdb_aging.mutex);
-            continue;
-		}
-      
-        pthread_mutex_unlock(&g_fdb_aging.mutex);
-
-        /* Perform aging scan */
-        hal_fdb_perform_aging_scan();
-	}
-}
-
-
-static hal_status_t hal_fdb_clear_hit_bit_and_reset_age(hal_fdb_entry_t *entry)
-{
-	/* Clear HIT bit in asic */
-	hal_status_t status = asic_l2_hit_clear(hal_unit_default(),
-										   entry->object_id);
-	if (status != HAL_SUCCESS) {
-		/* Log error but continue with other entries */
-		return status;
-	}
-
-    pthread_rwlock_wrlock(&g_fdb_table.lock);
-
-	/* Refresh entry in SW table. */
-	fdb_sw_entry_t *e = fdb_find_entry(entry->mac, entry->vlan_id);
-	if (e && e->valid) {
-		e->last_update = hal_time_now();
-		e->entry.age = 0;
-	}
-
-    pthread_rwlock_unlock(&g_fdb_table.lock);
-	
-	return HAL_SUCCESS;
-}
-
-
-static hal_status_t hal_fdb_delete_without_lock(hal_fdb_entry_t *entry)
-{
-    uint32_t hash = fdb_hash (entry->mac, entry->vlan_id);
-    fdb_sw_entry_t *e = g_fdb_table.buckets[hash];
-    fdb_sw_entry_t *prev = NULL;
-
-    while (e) {
-        if (e->valid &&
-            HAL_MAC_EQUAL(e->entry.mac, entry->mac) &&
-            e->entry.vlan_id == entry->vlan_id) {
-
-            /* Delete from ASIC */
-            hal_status_t rv = asic_l2_delete(hal_unit_default(),
-                                             e->entry.object_id);
-            if (rv != HAL_SUCCESS && rv != HAL_E_NOT_FOUND) {
-                return rv;
-            }
-
-            /* Remove from chain */
-            if (prev) {
-                prev->next = e->next;
-            } else {
-                g_fdb_table.buckets[hash] = e->next;
-            }
-
-            g_fdb_table.count--;
-            if (e->entry.flags & HAL_FLAG_STATIC) {
-                g_fdb_table.static_count--;
-            }
-
-            free(e);
-            return HAL_SUCCESS;
-        }
-        prev = e;
-        e = e->next;
-    }
-
-    return HAL_E_NOT_FOUND;
-}
-
-
-
-static void hal_fdb_perform_aging_scan(void)
-{
-    hal_fdb_entry_t to_reset[FDB_HASH_SIZE];
-    hal_fdb_entry_t to_delete[FDB_HASH_SIZE];
-    int to_reset_count = 0;
-    int to_delete_count = 0;
-	
-    hal_time_us_t now = hal_time_now();
-	uint32_t aging_time_sec;
-
-    pthread_mutex_lock(&g_fdb_aging.mutex);
-    aging_time_sec = g_fdb_aging.aging_time_sec;
-    pthread_mutex_unlock(&g_fdb_aging.mutex);
-
-    // Scan phase (read lock)
-    pthread_rwlock_rdlock(&g_fdb_table.lock);
-
-    for (int i = 0; i < FDB_HASH_SIZE; i++) {
-        fdb_sw_entry_t *e = g_fdb_table.buckets[i];
-        while (e) {
-			hal_fdb_entry_t entry = e->entry;
-
-            if ((!e->valid) || (entry.flags & HAL_FLAG_STATIC)) {
-                e = e->next;
-                continue;
-            }
-
-			/* Calculate current age */
-			entry.age = (uint32_t)((now - e->last_update) / 1000000);
-
-			if (entry.flags & HAL_FLAG_HIT) {
-				// Mark for reset (don't modify while holding read lock)
-				to_reset[to_reset_count++] = entry;
-			} else if (entry.age > aging_time_sec) {
-				to_delete[to_delete_count] = entry;
-			}
-
-            e = e->next;
-        }
-    }
-    pthread_rwlock_unlock(&g_fdb_table.lock);
-
-    // Process resets (need write lock for each)
-    for (int i = 0; i < to_reset_count; i++) {
-        hal_fdb_clear_hit_bit_and_reset_age(&to_reset[i]);
-	}
-
-	/* Table snapshot of callbacks */
-    pthread_mutex_lock(&g_fdb_callback_lock);
-    int callback_count = g_fdb_callback_count;
-    fdb_age_callback_t callbacks[FDB_MAX_AGE_CALLBACKS];
-    
-    /* Snapshot callbacks (copy while holding lock) */
-    for (int i = 0; i < callback_count; i++) {
-        callbacks[i] = g_fdb_callbacks[i];
-    }
-    pthread_mutex_unlock(&g_fdb_callback_lock);
-
-    // Invoke callbacks (no lock held!)
-    for (int i = 0; i < to_delete_count; i++) {
-        for (int j = 0; j < callback_count; j++) {
-            if (callbacks[j].callback) {
-                callbacks[j].callback(&to_delete[i], callbacks[j].context);
-            }
-        }
-    }
-
-    // Delete phase (write lock)
-    pthread_rwlock_wrlock(&g_fdb_table.lock);
-    for (int i = 0; i < to_delete_count; i++) {        
-        hal_fdb_delete_without_lock(&to_delete[i]);
-	}
-    pthread_rwlock_unlock(&g_fdb_table.lock);
-
 }
 
