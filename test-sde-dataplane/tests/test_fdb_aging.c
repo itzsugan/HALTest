@@ -614,85 +614,56 @@ TEST(test_config_change_during_aging)
 
 
 /* ============================================================================
- * Test Execution
- * ============================================================================ */
-
-int main(void)
-{
-    TEST_SETUP(hal_init);
-    TEST_TEARDOWN(hal_shutdown);
-
-    /* Callback Registration Tests */
-    RUN_TEST(test_callback_register_single);
-    RUN_TEST(test_callback_register_null);
-    RUN_TEST(test_callback_register_duplicate);
-    RUN_TEST(test_callback_register_multiple);
-    RUN_TEST(test_callback_register_full);
-    RUN_TEST(test_callback_unregister_not_found);
-
-    /* Aging Configuration Tests */
-    RUN_TEST(test_aging_set_get);
-    RUN_TEST(test_aging_set_zero);
-    RUN_TEST(test_interval_set_get);
-    RUN_TEST(test_interval_set_zero);
-    RUN_TEST(test_aging_get_null);
-
-    /* Thread Control Tests */
-    RUN_TEST(test_aging_start_stop);
-    RUN_TEST(test_aging_start_double);
-    RUN_TEST(test_aging_stop_not_running);
-    RUN_TEST(test_aging_start_stop_start);
-
-    /* Basic Aging Tests */
-    RUN_TEST(test_aging_dynamic_entry);
-    RUN_TEST(test_aging_static_entry);
-    RUN_TEST(test_aging_disabled);
-
-    /* Callback Tests */
-    RUN_TEST(test_callback_invoked_on_aging);
-    RUN_TEST(test_multiple_callbacks_invoked);
-
-    /* HIT Bit Tests */
-    RUN_TEST(test_hit_bit_prevents_aging);
-
-    /* Edge Cases */
-    RUN_TEST(test_empty_table_aging);
-    RUN_TEST(test_config_change_during_aging);
-
-    return 0;
-}
-
-/* ============================================================================
  * Main
  * ============================================================================ */
 
 static void run_basic_tests(void)
 {
-    TEST_SUITE_BEGIN("FDB Basic Tests");
+    TEST_SUITE_BEGIN("FDB Aging Basic Tests");
 
-    RUN_TEST_WITH_FIXTURE(fdb_entry_init);
-    RUN_TEST_WITH_FIXTURE(fdb_add_basic);
-    RUN_TEST_WITH_FIXTURE(fdb_add_duplicate);
-    RUN_TEST_WITH_FIXTURE(fdb_add_invalid_params);
-    RUN_TEST_WITH_FIXTURE(fdb_get_basic);
-    RUN_TEST_WITH_FIXTURE(fdb_get_not_found);
-    RUN_TEST_WITH_FIXTURE(fdb_delete_basic);
-    RUN_TEST_WITH_FIXTURE(fdb_delete_not_found);
-    RUN_TEST_WITH_FIXTURE(fdb_update_basic);
-    RUN_TEST_WITH_FIXTURE(fdb_stats);
-    RUN_TEST_WITH_FIXTURE(fdb_aging_not_implemented);
+    /* Callback Registration Tests */
+    RUN_TEST_WITH_FIXTURE(test_callback_register_single);
+    RUN_TEST_WITH_FIXTURE(test_callback_register_null);
+    RUN_TEST_WITH_FIXTURE(test_callback_register_duplicate);
+    RUN_TEST_WITH_FIXTURE(test_callback_register_multiple);
+    RUN_TEST_WITH_FIXTURE(test_callback_register_full);
+    RUN_TEST_WITH_FIXTURE(test_callback_unregister_not_found);
+
+    /* Aging Configuration Tests */
+    RUN_TEST_WITH_FIXTURE(test_aging_set_get);
+    RUN_TEST_WITH_FIXTURE(test_aging_set_zero);
+    RUN_TEST_WITH_FIXTURE(test_interval_set_get);
+    RUN_TEST_WITH_FIXTURE(test_interval_set_zero);
+    RUN_TEST_WITH_FIXTURE(test_aging_get_null);
+
+    /* Thread Control Tests */
+    RUN_TEST_WITH_FIXTURE(test_aging_start_stop);
+    RUN_TEST_WITH_FIXTURE(test_aging_start_double);
+    RUN_TEST_WITH_FIXTURE(test_aging_stop_not_running);
+    RUN_TEST_WITH_FIXTURE(test_aging_start_stop_start);
+
+    /* Basic Aging Tests */
+    RUN_TEST_WITH_FIXTURE(test_aging_dynamic_entry);
+    RUN_TEST_WITH_FIXTURE(test_aging_static_entry);
+    RUN_TEST_WITH_FIXTURE(test_aging_disabled);
+
+    /* Callback Tests */
+    RUN_TEST_WITH_FIXTURE(test_callback_invoked_on_aging);
+    RUN_TEST_WITH_FIXTURE(test_multiple_callbacks_invoked);
+
+    /* HIT Bit Tests */
+    RUN_TEST_WITH_FIXTURE(test_hit_bit_prevents_aging);
 
     TEST_SUITE_END();
 }
 
 static void run_bulk_tests(void)
 {
-    TEST_SUITE_BEGIN("FDB Bulk Tests");
+    TEST_SUITE_BEGIN("FDB Aging Bulk Tests");
 
-    RUN_TEST_WITH_FIXTURE(fdb_delete_by_port);
-    RUN_TEST_WITH_FIXTURE(fdb_delete_by_vlan);
-    RUN_TEST_WITH_FIXTURE(fdb_static_not_deleted);
-    RUN_TEST_WITH_FIXTURE(fdb_traverse);
+    /* Edge Cases */
+    RUN_TEST_WITH_FIXTURE(test_empty_table_aging);
+    RUN_TEST_WITH_FIXTURE(test_config_change_during_aging);
 
     TEST_SUITE_END();
 }
