@@ -300,7 +300,6 @@ static void *hal_fdb_aging_thread_main(void *arg)
 {
 	struct timespec timeout;
 	int scan_interval_sec;
-	bool should_stop = false;
 
 	(void) arg;
 	
@@ -337,6 +336,8 @@ static void *hal_fdb_aging_thread_main(void *arg)
         /* Perform aging scan */
         hal_fdb_perform_aging_scan();
 	}
+	
+	return NULL;
 }
 
 
