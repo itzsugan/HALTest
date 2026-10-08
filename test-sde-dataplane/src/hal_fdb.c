@@ -224,7 +224,7 @@ static void hal_fdb_perform_aging_scan(void)
     hal_fdb_entry_t to_delete[FDB_HASH_SIZE];
     int to_reset_count = 0;
     int to_delete_count = 0;
-	int count = 0;
+	uint32_t count = 0;
 	
     hal_time_us_t now = hal_time_now();
 	uint32_t aging_time_sec;
@@ -366,6 +366,7 @@ void hal_fdb_shutdown(void)
     /* Destroy synchronization primitives */
     pthread_rwlock_destroy(&g_fdb_table.lock);
     pthread_mutex_destroy(&g_fdb_aging.mutex);
+	pthread_cond_init(&g_fdb_aging.cond, NULL); // clear unprocessed signals.
     pthread_cond_destroy(&g_fdb_aging.cond);
 
     /* Reset initialization flag */
