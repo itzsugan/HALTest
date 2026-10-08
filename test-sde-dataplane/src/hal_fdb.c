@@ -133,6 +133,23 @@ static hal_status_t fdb_init(void)
 }
 
 
+/* Find entry in hash chain (must hold read lock) */
+static fdb_sw_entry_t *fdb_find_entry(const hal_mac_t mac, hal_vlan_t vlan)
+{
+    uint32_t hash = fdb_hash(mac, vlan);
+    fdb_sw_entry_t *e = g_fdb_table.buckets[hash];
+
+    while (e) {
+        if (e->valid &&
+            HAL_MAC_EQUAL(e->entry.mac, mac) &&
+            e->entry.vlan_id == vlan) {
+            return e;
+        }
+        e = e->next;
+    }
+    return NULL;
+}
+
 
 static hal_status_t hal_fdb_clear_hit_bit_and_reset_age(hal_fdb_entry_t *entry)
 {
@@ -350,23 +367,6 @@ void hal_fdb_shutdown(void)
     /* Reset initialization flag */
     g_fdb_initialized = false;
     pthread_mutex_unlock(&g_fdb_init_lock);
-}
-
-/* Find entry in hash chain (must hold read lock) */
-static fdb_sw_entry_t *fdb_find_entry(const hal_mac_t mac, hal_vlan_t vlan)
-{
-    uint32_t hash = fdb_hash(mac, vlan);
-    fdb_sw_entry_t *e = g_fdb_table.buckets[hash];
-
-    while (e) {
-        if (e->valid &&
-            HAL_MAC_EQUAL(e->entry.mac, mac) &&
-            e->entry.vlan_id == vlan) {
-            return e;
-        }
-        e = e->next;
-    }
-    return NULL;
 }
 
 /* ============================================================================
