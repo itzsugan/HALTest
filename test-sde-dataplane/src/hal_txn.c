@@ -53,14 +53,6 @@ hal_status_t hal_txn_shutdown(void)
 /* ============================================================================
  * Transaction State Machine
  * ============================================================================ */
-
-static hal_status_t txn_validate_state(hal_txn_t *txn, hal_txn_state_t expected)
-{
-    if (!txn) return HAL_E_NULL;
-    if (txn->state != expected) return HAL_E_FAIL;
-    return HAL_SUCCESS;
-}
-
 static void txn_transition_state(hal_txn_t *txn, hal_txn_state_t new_state)
 {
     if (txn) {
@@ -359,7 +351,7 @@ static hal_status_t rollback_fdb_entry(const hal_txn_op_entry_t *op_entry)
             
         case HAL_TXN_OP_UPDATE:
             /* Reverse: restore original */
-            rv = hal_fdb_update(&op_entry->original);
+            rv = hal_fdb_update((hal_fdb_entry_t *)&op_entry->original);
             break;
             
         default:
@@ -396,7 +388,7 @@ static hal_status_t rollback_route_entry(const hal_txn_op_entry_t *op_entry)
             
         case HAL_TXN_OP_UPDATE:
             /* Reverse: restore original */
-            rv = hal_route_update(&op_entry->original);
+            rv = hal_route_update((hal_route_entry_t *)&op_entry->original);
             break;
             
         default:
@@ -460,7 +452,7 @@ static hal_status_t apply_fdb_operation(const hal_txn_op_entry_t *op_entry)
         case HAL_TXN_OP_DELETE:
             return hal_fdb_delete(op_entry->entry.fdb.mac, op_entry->entry.fdb.vlan_id);
         case HAL_TXN_OP_UPDATE:
-            return hal_fdb_update(&op_entry->entry.fdb);
+            return hal_fdb_update((hal_fdb_entry_t *)&op_entry->entry.fdb);
         default:
             return HAL_E_PARAM;
     }
@@ -480,7 +472,7 @@ static hal_status_t apply_route_operation(const hal_txn_op_entry_t *op_entry)
                                     op_entry->entry.route.prefix,
                                     op_entry->entry.route.prefix_len);
         case HAL_TXN_OP_UPDATE:
-            return hal_route_update(&op_entry->entry.route);
+            return hal_route_update((hal_route_entry_t *)&op_entry->entry.route);
         default:
             return HAL_E_PARAM;
     }
