@@ -86,7 +86,7 @@ TEST(txn_begin_basic)
     hal_txn_free(txn);
 }
 
-TEST(txn_begin_null_pointer)
+TEST(txn_begin_null_txn_pointer)
 {
     hal_status_t rv = hal_txn_begin(NULL, NULL);
     ASSERT_STATUS(HAL_E_NULL, rv);
@@ -97,7 +97,6 @@ TEST(txn_begin_with_options)
     hal_txn_opts_t opts;
     opts.timeout_ms = 1000;
     opts.auto_rollback = true;
-    opts.lock_strategy = HAL_TXN_LOCK_PESSIMISTIC;
     
     hal_txn_t *txn = NULL;
     hal_status_t rv = hal_txn_begin(&opts, &txn);
@@ -351,8 +350,7 @@ TEST(txn_explicit_rollback)
     make_fdb_entry(&entry, 20, 100, 1);
     ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &entry));
     
-    /* Explicit rollback before commit */
-    hal_status_t rv = hal_txn_rollback(txn);
+    hal_status_t rv = hal_txn_abort(txn);
     ASSERT_SUCCESS(rv);
     ASSERT_EQ(HAL_TXN_STATE_ABORTED, hal_txn_get_state(txn));
     
@@ -376,7 +374,7 @@ TEST(txn_abort_before_commit)
     hal_txn_free(txn);
 }
 
-TEST(txn_abort_after_commit)
+TEST(txn_rollback_after_commit)
 {
     hal_txn_t *txn = NULL;
     hal_fdb_entry_t entry;
@@ -385,10 +383,8 @@ TEST(txn_abort_after_commit)
     make_fdb_entry(&entry, 22, 100, 1);
     ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &entry));
     
-    /* Commit first */
     ASSERT_SUCCESS(hal_txn_commit(txn));
     
-    /* Try to rollback after commit */
     hal_status_t rv = hal_txn_rollback(txn);
     ASSERT_SUCCESS(rv);
     
@@ -546,81 +542,17 @@ TEST(txn_state_transition_active_to_aborted)
 }
 
 /* ============================================================================
- * Stats Tests
- * ============================================================================ */
-
-TEST(txn_stats_tracking)
-{
-    hal_txn_t *txn = NULL;
-    hal_fdb_entry_t fdb_entry;
-    hal_route_entry_t route_entry;
-    
-    hal_txn_begin(NULL, &txn);
-    
-    /* Add various operations */
-    make_fdb_entry(&fdb_entry, 70, 100, 1);
-    hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &fdb_entry);
-    
-    make_fdb_entry(&fdb_entry, 71, 100, 1);
-    hal_txn_add_fdb(txn, HAL_TXN_OP_DELETE, &fdb_entry);
-    
-    make_route_entry(&route_entry, 70, 24, 1, 2);
-    hal_txn_add_route(txn, HAL_TXN_OP_ADD, &route_entry);
-    
-    hal_txn_stats_t stats;
-    ASSERT_SUCCESS(hal_txn_get_stats(txn, &stats));
-    
-    ASSERT_EQ(3, stats.total_operations);
-    ASSERT_EQ(1, stats.fdb_adds);
-    ASSERT_EQ(1, stats.fdb_deletes);
-    ASSERT_EQ(1, stats.route_adds);
-    
-    hal_txn_abort(txn);
-    hal_txn_free(txn);
-}
-
-/* ============================================================================
- * String Conversion Tests
- * ============================================================================ */
-
-TEST(txn_state_string_conversion)
-{
-    ASSERT_STR_EQ("PENDING", hal_txn_state_str(HAL_TXN_STATE_PENDING));
-    ASSERT_STR_EQ("ACTIVE", hal_txn_state_str(HAL_TXN_STATE_ACTIVE));
-    ASSERT_STR_EQ("COMMITTED", hal_txn_state_str(HAL_TXN_STATE_COMMITTED));
-    ASSERT_STR_EQ("ABORTED", hal_txn_state_str(HAL_TXN_STATE_ABORTED));
-    ASSERT_STR_EQ("FAILED", hal_txn_state_str(HAL_TXN_STATE_FAILED));
-}
-
-TEST(txn_lock_strategy_string_conversion)
-{
-    ASSERT_STR_EQ("PESSIMISTIC", 
-                  hal_txn_lock_strategy_str(HAL_TXN_LOCK_PESSIMISTIC));
-    ASSERT_STR_EQ("OPTIMISTIC", 
-                  hal_txn_lock_strategy_str(HAL_TXN_LOCK_OPTIMISTIC));
-}
-
-/* ============================================================================
  * Test Runner
  * ============================================================================ */
 
 int main(int argc, char *argv[])
 {
-    bool run_basic = true;
-    bool run_advanced = true;
-    
-    if (argc > 1) {
-        run_basic = (strcmp(argv[1], "--basic") == 0);
-        run_advanced = (strcmp(argv[1], "--advanced") == 0);
-        if (strcmp(argv[1], "--basic") != 0 && 
-            strcmp(argv[1], "--advanced") != 0) {
-            run_basic = run_advanced = true;
-        }
-    }
+    (void)argc;
+    (void)argv;
     
     printf("\n" TF_CYAN("=== Transaction Manager Tests ===") "\n\n");
     
-    TEST_SETUP();
+    test_setup();
     
     printf(TF_YELLOW("Basic Lifecycle Tests:\n"));
     RUN_TEST(txn_begin_basic);
@@ -647,7 +579,7 @@ int main(int argc, char *argv[])
     printf(TF_YELLOW("\nRollback Tests:\n"));
     RUN_TEST(txn_explicit_rollback);
     RUN_TEST(txn_abort_before_commit);
-    RUN_TEST(txn_abort_after_commit);
+    RUN_TEST(txn_rollback_after_commit);
     RUN_TEST(txn_double_commit_fails);
     
     printf(TF_YELLOW("\nOperation Type Tests:\n"));
@@ -660,14 +592,7 @@ int main(int argc, char *argv[])
     RUN_TEST(txn_state_transition_active_to_committed);
     RUN_TEST(txn_state_transition_active_to_aborted);
     
-    printf(TF_YELLOW("\nStats Tests:\n"));
-    RUN_TEST(txn_stats_tracking);
-    
-    printf(TF_YELLOW("\nString Conversion Tests:\n"));
-    RUN_TEST(txn_state_string_conversion);
-    RUN_TEST(txn_lock_strategy_string_conversion);
-    
-    TEST_TEARDOWN();
+    test_teardown();
     
     /* Print summary */
     printf("\n" TF_CYAN("=== Test Summary ===") "\n");

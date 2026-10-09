@@ -16,6 +16,7 @@
 #include "hal_error.h"
 #include "hal_fdb.h"
 #include "hal_route.h"
+#include "hal_resource.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -124,7 +125,7 @@ typedef struct txn_lock_manager_s {
 	txn_entry_lock_t locks[TXN_LOCK_TABLE_SIZE];
 	pthread_mutex_t mutex;
 } txn_lock_manager_t;
- 
+
 
 /**
  * Single operation recorded in transaction journal
