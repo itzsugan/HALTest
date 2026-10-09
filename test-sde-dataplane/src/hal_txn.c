@@ -169,6 +169,20 @@ static void free_entry_lock(uint32_t lock_idx, uint32_t txn_id)
     pthread_mutex_unlock(&g_txn_lock_mgr.mutex);
 }
 
+static void txn_release_locks(hal_txn_t *txn)
+{
+    if (!txn) {
+        return;
+    }
+
+    for (size_t i = 0; i < txn->entry_count; i++) {
+        if (txn->entries[i].locked) {
+            free_entry_lock(txn->entries[i].lock_index, (uint32_t)txn->id);
+            txn->entries[i].locked = false;
+        }
+    }
+}
+
 
 uint64_t get_fdb_key (const hal_fdb_entry_t *entry)
 {
@@ -586,6 +600,8 @@ hal_status_t hal_txn_add_fdb(hal_txn_t *txn, hal_txn_op_t op,
 		hal_fdb_entry_t old_entry;
         rv = hal_fdb_get(entry->mac, entry->vlan_id, &old_entry);
 		if (rv != HAL_SUCCESS) {
+			free_entry_lock(lock_idx, (uint32_t)txn->id);
+			op_entry->locked = false;
 			return rv;
 		}
         op_entry->original.fdb = old_entry;
@@ -738,22 +754,17 @@ hal_status_t hal_txn_commit(hal_txn_t *txn)
             if (txn->opts.auto_rollback) {
                 txn_do_rollback(txn);
             }
-			txn_transition_state(txn, HAL_TXN_STATE_FAILED);
-			return rv;
+            txn_release_locks(txn);
+            hal_txn_unreserve(txn);
+		txn_transition_state(txn, HAL_TXN_STATE_FAILED);
+		return rv;
         }
         op_entry->applied = true;
         txn->applied_count++;
     }
     
     /* Step 3: Mark resources as allocated */
-
-    /* Release all locks held by this transaction */
-    for (size_t i = 0; i < txn->entry_count; i++) {
-        if (txn->entries[i].locked) {
-            free_entry_lock(txn->entries[i].lock_index, (uint32_t)txn->id);
-            txn->entries[i].locked = false;
-        }
-    }
+    txn_release_locks(txn);
 	hal_txn_unreserve(txn);
 
     txn_transition_state(txn, HAL_TXN_STATE_COMMITTED);
@@ -774,16 +785,8 @@ hal_status_t hal_txn_rollback(hal_txn_t *txn)
         txn_do_rollback(txn);
     }
     
-    /* Release all locks held by this transaction */
-    for (size_t i = 0; i < txn->entry_count; i++) {
-        if (txn->entries[i].locked) {
-            free_entry_lock(txn->entries[i].lock_index, (uint32_t)txn->id);
-            txn->entries[i].locked = false;
-        }
-    }
-    
-    /* Release reserved resources */
-	hal_txn_unreserve(txn);
+    txn_release_locks(txn);
+    hal_txn_unreserve(txn);
 
     txn_transition_state(txn, HAL_TXN_STATE_ABORTED);
     return HAL_SUCCESS;
@@ -801,7 +804,7 @@ hal_status_t hal_txn_abort(hal_txn_t *txn)
         return HAL_SUCCESS;
     }
 
-    /* ONLY abort PENDING or ACTIVE transactions (pre-commit cleanup) */
+    /* Allow cleanup after a failed commit as well as pre-commit cleanup */
     if (txn->state != HAL_TXN_STATE_PENDING && 
 		txn->state != HAL_TXN_STATE_FAILED &&
         txn->state != HAL_TXN_STATE_ACTIVE) {
@@ -812,15 +815,8 @@ hal_status_t hal_txn_abort(hal_txn_t *txn)
         txn_do_rollback(txn);
     }
 
-    for (size_t i = 0; i < txn->entry_count; i++) {
-        if (txn->entries[i].locked) {
-            free_entry_lock(txn->entries[i].lock_index, (uint32_t)txn->id);
-            txn->entries[i].locked = false;
-        }
-    }
-
-    /* Release reserved resources */
-	hal_txn_unreserve(txn);
+    txn_release_locks(txn);
+    hal_txn_unreserve(txn);
 
     txn_transition_state(txn, HAL_TXN_STATE_ABORTED);
     return HAL_SUCCESS;
@@ -832,17 +828,12 @@ hal_status_t hal_txn_free(hal_txn_t *txn)
 
 	if (txn->state != HAL_TXN_STATE_PENDING &&
 		txn->state != HAL_TXN_STATE_COMMITTED &&
-		txn->state != HAL_TXN_STATE_ABORTED) {
+		txn->state != HAL_TXN_STATE_ABORTED &&
+		txn->state != HAL_TXN_STATE_FAILED) {
 		return HAL_E_BUSY;
 	}
 
-    /* Release any remaining locks */
-    for (size_t i = 0; i < txn->entry_count; i++) {
-        if (txn->entries[i].locked) {
-            free_entry_lock(txn->entries[i].lock_index, txn->id);
-            txn->entries[i].locked = false;
-        }
-    }
+    txn_release_locks(txn);
 
     if (txn->entries) {
         free(txn->entries);

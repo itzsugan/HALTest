@@ -312,6 +312,50 @@ TEST(txn_rollback_after_commit)
     hal_txn_free(txn);
 }
 
+TEST(txn_commit_failure_cleans_up)
+{
+    hal_txn_t *txn = NULL;
+    hal_fdb_entry_t entry;
+
+    make_fdb_entry(&entry, 24, 100, 1);
+    ASSERT_SUCCESS(hal_fdb_add(&entry));
+
+    hal_txn_begin(NULL, &txn);
+    make_fdb_entry(&entry, 24, 100, 1);
+    ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &entry));
+
+    hal_status_t rv = hal_txn_commit(txn);
+    ASSERT_STATUS(HAL_E_EXISTS, rv);
+    ASSERT_EQ(HAL_TXN_STATE_FAILED, hal_txn_get_state(txn));
+
+    make_fdb_entry(&entry, 24, 100, 1);
+    rv = hal_fdb_get(entry.mac, entry.vlan_id, &entry);
+    ASSERT_SUCCESS(rv);
+
+    ASSERT_SUCCESS(hal_txn_abort(txn));
+    ASSERT_EQ(HAL_TXN_STATE_ABORTED, hal_txn_get_state(txn));
+
+    hal_txn_free(txn);
+}
+
+TEST(txn_fdb_delete_missing_entry_releases_lock)
+{
+    hal_txn_t *txn = NULL;
+    hal_fdb_entry_t entry;
+
+    hal_txn_begin(NULL, &txn);
+    make_fdb_entry(&entry, 25, 100, 1);
+
+    hal_status_t rv = hal_txn_add_fdb(txn, HAL_TXN_OP_DELETE, &entry);
+    ASSERT_STATUS(HAL_E_NOT_FOUND, rv);
+    ASSERT_EQ(HAL_TXN_STATE_PENDING, hal_txn_get_state(txn));
+
+    ASSERT_SUCCESS(hal_txn_abort(txn));
+    ASSERT_EQ(HAL_TXN_STATE_ABORTED, hal_txn_get_state(txn));
+
+    hal_txn_free(txn);
+}
+
 TEST(txn_double_commit_fails)
 {
     hal_txn_t *txn = NULL;
@@ -678,6 +722,8 @@ int main(int argc, char *argv[])
     printf(TF_YELLOW("\nRollback Tests:\n"));
     RUN_TEST(txn_abort_before_commit);
     RUN_TEST(txn_rollback_after_commit);
+    RUN_TEST(txn_commit_failure_cleans_up);
+    RUN_TEST(txn_fdb_delete_missing_entry_releases_lock);
     RUN_TEST(txn_double_commit_fails);
     RUN_TEST(txn_rollback_fdb_add_removes_entry);
     RUN_TEST(txn_rollback_fdb_delete_restores_entry);
