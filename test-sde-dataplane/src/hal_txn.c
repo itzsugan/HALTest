@@ -39,8 +39,7 @@ static txn_lock_manager_t g_txn_lock_mgr = {
  * Called from hal_init to set up resource pools
  * This is called internally by the HAL layer
  */
-hal_status_t hal_txn_init(hal_resource_pool_t *fdb_pool,
-                          hal_resource_pool_t *route_pool)
+hal_status_t hal_txn_init(void)
 {
     return HAL_SUCCESS;
 }
@@ -220,7 +219,6 @@ static hal_status_t lock_acquire_fdb(const hal_fdb_entry_t *entry,
                                      uint32_t txn_id, uint32_t *lock_idx)
 {
 	txn_entry_lock_t *cur_lock 	= NULL;
-    txn_entry_lock_t *new_lock = NULL;
     uint64_t 		  key 		= 0;
 	hal_status_t	  ret_val 	= HAL_SUCCESS;
 
@@ -258,7 +256,6 @@ static hal_status_t lock_acquire_route(const hal_route_entry_t *entry,
                                      uint32_t txn_id, uint32_t *lock_idx)
 {
 	txn_entry_lock_t *cur_lock 	= NULL;
-    txn_entry_lock_t *new_lock = NULL;
     uint64_t 		  key 		= 0;
 	hal_status_t	  ret_val 	= HAL_SUCCESS;
 
@@ -287,6 +284,23 @@ static hal_status_t lock_acquire_route(const hal_route_entry_t *entry,
     pthread_mutex_unlock(&g_txn_lock_mgr.mutex);
     return HAL_SUCCESS;
 }
+
+static void hal_txn_unreserve (hal_txn_t *txn)
+{
+	hal_resource_pool_t *fdb_pool 	= hal_resource_get_pool(HAL_RESOURCE_FDB_ENTRY);
+	hal_resource_pool_t *route_pool = hal_resource_get_pool(HAL_RESOURCE_ROUTE_ENTRY);
+
+    if (txn->fdb_reserved > 0 && fdb_pool) {
+        hal_resource_unreserve(fdb_pool, txn->fdb_reserved);
+        txn->fdb_reserved = 0;
+    }
+
+    if (txn->route_reserved > 0 && route_pool) {
+        hal_resource_unreserve(route_pool, txn->route_reserved);
+        txn->route_reserved = 0;
+    }
+}
+
 
 static hal_status_t hal_txn_reserve (hal_txn_t *txn)
 {
@@ -320,22 +334,80 @@ static hal_status_t hal_txn_reserve (hal_txn_t *txn)
     return HAL_SUCCESS;
 }
 
-static void hal_txn_unreserve (hal_txn_t *txn)
+/* ============================================================================
+ * Rollback Operations
+ * ============================================================================ */
+
+static hal_status_t rollback_fdb_entry(const hal_txn_op_entry_t *op_entry)
 {
-	uint32_t fdb_adds   = txn->stats.fdb_adds;
-	uint32_t route_adds = txn->stats.route_adds;
-	hal_resource_pool_t *fdb_pool 	= hal_resource_get_pool(HAL_RESOURCE_FDB_ENTRY);
-	hal_resource_pool_t *route_pool = hal_resource_get_pool(HAL_RESOURCE_ROUTE_ENTRY);
+    hal_status_t rv;
 
-    if (txn->fdb_reserved > 0 && fdb_pool) {
-        hal_resource_unreserve(fdb_pool, txn->fdb_reserved);
-        txn->fdb_reserved = 0;
+	if (!op_entry) {
+		return HAL_E_NULL;
+	}
+    
+    switch (op_entry->op) {
+        case HAL_TXN_OP_ADD:
+            /* Reverse: delete the entry */
+            rv = hal_fdb_delete(op_entry->entry.fdb.mac, op_entry->entry.fdb.vlan_id);
+            break;
+            
+        case HAL_TXN_OP_DELETE:
+            /* Reverse: add back from snapshot */
+            rv = hal_fdb_add((hal_fdb_entry_t *)&op_entry->original);
+            break;
+            
+        case HAL_TXN_OP_UPDATE:
+            /* Reverse: restore original */
+            rv = hal_fdb_update(&op_entry->original);
+            break;
+            
+        default:
+            rv = HAL_E_PARAM;
     }
 
-    if (txn->route_reserved > 0 && route_pool) {
-        hal_resource_unreserve(route_pool, txn->route_reserved);
-        txn->route_reserved = 0;
+    if (rv != HAL_SUCCESS) {
+        /* Log error */
     }
+    
+    return rv;
+}
+
+static hal_status_t rollback_route_entry(const hal_txn_op_entry_t *op_entry)
+{
+    hal_status_t rv;
+    
+	if (!op_entry) {
+		return HAL_E_NULL;
+	}
+    
+    switch (op_entry->op) {
+        case HAL_TXN_OP_ADD:
+            /* Reverse: delete the entry */
+            rv = hal_route_delete(op_entry->entry.route.vrf_id,
+                                  op_entry->entry.route.prefix,
+                                  op_entry->entry.route.prefix_len);
+            break;
+            
+        case HAL_TXN_OP_DELETE:
+            /* Reverse: add back from snapshot */
+            rv = hal_route_add((hal_route_entry_t *)&op_entry->original);
+            break;
+            
+        case HAL_TXN_OP_UPDATE:
+            /* Reverse: restore original */
+            rv = hal_route_update(&op_entry->original);
+            break;
+            
+        default:
+            rv = HAL_E_PARAM;
+    }
+
+    if (rv != HAL_SUCCESS) {
+        /* Log error */
+    }
+    
+    return rv;
 }
 
 static hal_status_t txn_do_rollback(hal_txn_t *txn)
@@ -682,83 +754,6 @@ hal_status_t hal_txn_commit(hal_txn_t *txn)
 
     txn_transition_state(txn, HAL_TXN_STATE_COMMITTED);
     return HAL_SUCCESS;
-}
-
-
-/* ============================================================================
- * Rollback Operations
- * ============================================================================ */
-
-static hal_status_t rollback_fdb_entry(const hal_txn_op_entry_t *op_entry)
-{
-    hal_status_t rv;
-
-	if (!op_entry) {
-		return HAL_E_NULL;
-	}
-    
-    switch (op_entry->op) {
-        case HAL_TXN_OP_ADD:
-            /* Reverse: delete the entry */
-            rv = hal_fdb_delete(op_entry->entry.fdb.mac, op_entry->entry.fdb.vlan_id);
-            break;
-            
-        case HAL_TXN_OP_DELETE:
-            /* Reverse: add back from snapshot */
-            rv = hal_fdb_add(&op_entry->original);
-            break;
-            
-        case HAL_TXN_OP_UPDATE:
-            /* Reverse: restore original */
-            rv = hal_fdb_update(&op_entry->original);
-            break;
-            
-        default:
-            rv = HAL_E_PARAM;
-    }
-
-    if (rv != HAL_SUCCESS) {
-        /* Log error */
-    }
-    
-    return rv;
-}
-
-static hal_status_t rollback_route_entry(const hal_txn_op_entry_t *op_entry)
-{
-    hal_status_t rv;
-    
-	if (!op_entry) {
-		return HAL_E_NULL;
-	}
-    
-    switch (op_entry->op) {
-        case HAL_TXN_OP_ADD:
-            /* Reverse: delete the entry */
-            rv = hal_route_delete(op_entry->entry.route.vrf_id,
-                                  op_entry->entry.route.prefix,
-                                  op_entry->entry.route.prefix_len);
-            break;
-            
-        case HAL_TXN_OP_DELETE:
-            /* Reverse: add back from snapshot */
-            rv = hal_route_add(&op_entry->original);
-            break;
-            
-        case HAL_TXN_OP_UPDATE:
-            /* Reverse: restore original */
-            rv = hal_route_update(&op_entry->original);
-            break;
-            
-        default:
-            rv = HAL_E_PARAM;
-    }
-
-    if (rv != HAL_SUCCESS) {
-        /* Log error */
-    }
-    
-    return rv;
 }
 
 

@@ -356,8 +356,7 @@ const char *hal_txn_state_str(hal_txn_state_t state);
  * @param route_pool    Route resource pool
  * @return              HAL_SUCCESS or error
  */
-hal_status_t hal_txn_init(hal_resource_pool_t *fdb_pool,
-                          hal_resource_pool_t *route_pool);
+hal_status_t hal_txn_init(void);
 
 /**
  * Shutdown transaction manager
