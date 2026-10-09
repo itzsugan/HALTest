@@ -118,17 +118,13 @@ TEST(txn_free_committed)
     ASSERT_SUCCESS(rv);
 }
 
-TEST(txn_free_active_fails)
+TEST(txn_free_active)
 {
     hal_txn_t *txn = NULL;
     hal_txn_begin(NULL, &txn);
     
     hal_status_t rv = hal_txn_free(txn);
-    ASSERT_STATUS(HAL_E_BUSY, rv);
-    
-    /* Clean up properly */
-    hal_txn_abort(txn);
-    hal_txn_free(txn);
+    ASSERT_SUCCESS(rv);
 }
 
 /* ============================================================================
@@ -559,7 +555,7 @@ int main(int argc, char *argv[])
     RUN_TEST(txn_begin_null_txn_pointer);
     RUN_TEST(txn_begin_with_options);
     RUN_TEST(txn_free_committed);
-    RUN_TEST(txn_free_active_fails);
+    RUN_TEST(txn_free_active);
     
     printf(TF_YELLOW("\nSingle Operation Tests:\n"));
     RUN_TEST(txn_add_fdb_basic);

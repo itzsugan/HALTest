@@ -837,8 +837,6 @@ hal_status_t hal_txn_free(hal_txn_t *txn)
         free(txn->entries);
     }
 
-	/* Remove transaction from TXN list */
-
     /* Remove transaction from TXN list */
     pthread_mutex_lock(&g_txn_global_lock);
     if (txn->prev != NULL) {
