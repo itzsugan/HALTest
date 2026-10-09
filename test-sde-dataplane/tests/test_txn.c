@@ -401,14 +401,14 @@ TEST(txn_rollback_fdb_update_restores_original)
     make_fdb_entry(&retrieved, 73, 100, 2);
     hal_status_t rv = hal_fdb_get(retrieved.mac, retrieved.vlan_id, &retrieved);
     ASSERT_SUCCESS(rv);
-    ASSERT_EQ(2, HAL_PORT_GET_ID(retrieved.port));
+    ASSERT_EQ(2, retrieved.port);
     
     ASSERT_SUCCESS(hal_txn_rollback(txn));
     
     make_fdb_entry(&retrieved, 73, 100, 1);
     rv = hal_fdb_get(retrieved.mac, retrieved.vlan_id, &retrieved);
     ASSERT_SUCCESS(rv);
-    ASSERT_EQ(1, HAL_PORT_GET_ID(retrieved.port));
+    ASSERT_EQ(1, retrieved.port);
     
     hal_txn_free(txn);
 }
