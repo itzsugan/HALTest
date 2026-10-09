@@ -65,12 +65,12 @@ typedef enum hal_txn_table_e {
  * Tracks the lifecycle of a transaction through its various states.
  */
 typedef enum hal_txn_state_e {
-    HAL_TXN_STATE_INVALID=0,
+    HAL_TXN_STATE_INVALID = 0,
     HAL_TXN_STATE_PENDING,   /* Initialized, accepting operations */
     HAL_TXN_STATE_ACTIVE,    /* Operations being applied */
     HAL_TXN_STATE_COMMITTED, /* Successfully committed */
-    HAL_TXN_STATE_ABORTED,   /* Aborted or rolled back */
-    HAL_TXN_STATE_FAILED     /* Commit failed, automatic rollback performed */
+    HAL_TXN_STATE_FAILED,    /* Commit failed, automatic rollback performed */
+    HAL_TXN_STATE_ABORTED    /* Aborted or rolled back */
 } hal_txn_state_t;
 
 
@@ -105,7 +105,7 @@ typedef struct hal_txn_stats_s {
 } hal_txn_stats_t;
 
 /**
- * Txn Entry lock structure
+ * Transaction Entry Lock Structure
  *
  * Uses pessimistic locking approach: lock on add, release on commit/abort.
  * Lock granularity is per-entry
@@ -114,9 +114,9 @@ typedef struct hal_txn_stats_s {
 
 typedef struct 	txn_entry_lock_a {
 	hal_txn_table_t		table;
-	uint64_t 			key;
-	uint64_t 			owner_txn_id;
-	bool 				locked;
+	uint64_t 			key;            /* key (MAC+VLAN or VRF+prefix+len) */
+	uint64_t 			owner_txn_id;   /* Transaction ID holding the lock */
+	bool 				locked;         /* Lock state: true if currently held */
 } txn_entry_lock_t;
 
 
@@ -275,7 +275,7 @@ hal_status_t hal_txn_commit(hal_txn_t *txn);
  * @note Transaction enters ABORTED state after rollback completes.
  *       Resources are released back to pools.
  */
-hal_status_t hal_txn_commit(hal_txn_t *txn);
+hal_status_t hal_txn_rollback(hal_txn_t *txn);
 
 
 /**
@@ -338,13 +338,6 @@ hal_status_t hal_txn_get_stats(hal_txn_t *txn, hal_txn_stats_t *stats);
  */
 const char *hal_txn_state_str(hal_txn_state_t state);
 
-/**
- * Convert lock strategy to string representation
- *
- * @param strategy  Lock strategy
- * @return          Human-readable string (never NULL)
- */
-const char *hal_txn_lock_strategy_str(hal_txn_lock_strategy_t strategy);
 
 /* ============================================================================
  * Internal Initialization (Called by hal_init)

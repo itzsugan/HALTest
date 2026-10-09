@@ -26,7 +26,7 @@ static hal_txn_t		*gp_txn_list	  = NULL;
 static pthread_mutex_t 	g_txn_global_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t 		g_txn_next_id 	  = 1;
 
-static lock_manager_t g_txn_lock_mgr = {
+static txn_lock_manager_t g_txn_lock_mgr = {
     .locks = {0}, 
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
@@ -97,10 +97,10 @@ static hal_status_t txn_check_and_recalc_capacity(hal_txn_t *txn)
     if (!txn) return HAL_E_NULL;
 
     if (txn->entry_count < txn->entry_capacity) {
-        return HAL_SUCCESS; /* No. of entry is within entry_capacity */
+        return HAL_SUCCESS; /* Capacity sufficient */
     }
     
-    /* Entry capacity need to grow */
+    /* Need to grow */
     size_t new_capacity = txn->entry_capacity > 0 ?
 								txn->entry_capacity * 2 : TXN_INIT_ENTRY_CAPACITY;
     if (new_capacity > TXN_MAX_ENTRY_CAPACITY) {
@@ -108,7 +108,7 @@ static hal_status_t txn_check_and_recalc_capacity(hal_txn_t *txn)
     }
     
     if (new_capacity <= txn->entry_capacity) {
-        return HAL_E_FULL;
+        return HAL_E_FULL;  /* Already at max capacity */
     }
     
     hal_txn_op_entry_t *new_entries = realloc(txn->entries,
@@ -167,11 +167,15 @@ static hal_status_t allocate_entry_lock(hal_txn_table_t table, uint64_t key,
 
 static void free_entry_lock(uint32_t lock_idx, uint32_t txn_id)
 {
+	pthread_mutex_lock(&g_txn_lock_mgr.mutex);
+
 	txn_entry_lock_t *new_lock = &g_txn_lock_mgr.locks[lock_idx];
 
 	if (txn_id == new_lock->owner_txn_id){
 		memset(new_lock, 0, sizeof(txn_entry_lock_t));
 	}
+
+    pthread_mutex_unlock(&g_txn_lock_mgr.mutex);
 }
 
 
@@ -183,13 +187,13 @@ uint64_t get_fdb_key (const hal_fdb_entry_t *entry)
 		return HAL_E_NULL;
 	}
 
-	/* Compose Key from entry->mac + entry->vlan_id */
+	/* Compose Key from MAC address (48-bit) + VLAN (12-bit) */
     for (int i = 0; i < 6; i++) {
         key = (key << 8) | entry->mac[i];
     }
 
     key <<= 16;
-    key |= (entry->vlan_id & 0x0FFF);
+    key |= (entry->vlan_id & 0x0FFF);  /* Mask to standard 12-bit VLAN */
 	
 	return key;
 }
@@ -202,9 +206,9 @@ uint64_t get_route_key (const hal_route_entry_t *entry)
 		return HAL_E_NULL;
 	}
 
-    key |= ((uint64_t)entry->vrf_id << 48);
-    key |= ((uint64_t)entry->prefix << 16);
-    key |= ((uint64_t)entry->prefix_len);
+    key |= ((uint64_t)entry->vrf_id << 48);   /* VRF in high bits */
+    key |= ((uint64_t)entry->prefix << 16);   /* Prefix in middle */
+    key |= ((uint64_t)entry->prefix_len);     /* Prefix length in low bits */
 
     return key;
 }
@@ -296,7 +300,7 @@ static hal_status_t hal_txn_reserve (hal_txn_t *txn)
     if (fdb_adds > 0 && fdb_pool) {
         rv = hal_resource_reserve(fdb_pool, fdb_adds);
         if (rv != HAL_SUCCESS) {
-            hal_txn_unreserve(txn);
+            hal_txn_unreserve(txn);  /* Rollback on failure */
 			return rv;
         }
         txn->fdb_reserved = fdb_adds;
@@ -306,12 +310,14 @@ static hal_status_t hal_txn_reserve (hal_txn_t *txn)
     if (route_adds > 0 && route_pool) {
         rv = hal_resource_reserve(route_pool, route_adds);
         if (rv != HAL_SUCCESS) {
-            hal_txn_unreserve(txn);
+            hal_txn_unreserve(txn);  /* Rollback on failure */
 			return rv;
         }
         txn->route_reserved = route_adds;
         txn->stats.resources_reserved += route_adds;
     }
+    
+    return HAL_SUCCESS;
 }
 
 static void hal_txn_unreserve (hal_txn_t *txn)
@@ -716,6 +722,34 @@ static hal_status_t txn_do_rollback(hal_txn_t *txn)
     return HAL_SUCCESS;
 }
 
+hal_status_t hal_txn_rollback(hal_txn_t *txn)
+{
+    if (!txn) return HAL_E_NULL;
+    
+    /* ONLY rollback COMMITTED transactions (post-commit reversal) */
+    if (txn->state != HAL_TXN_STATE_COMMITTED) {
+        return HAL_E_FAIL;
+    }
+    
+    if (txn->applied_count > 0) {
+        txn_do_rollback(txn);
+    }
+    
+    /* Release all locks held by this transaction */
+    for (size_t i = 0; i < txn->entry_count; i++) {
+        if (txn->entries[i].locked) {
+            free_entry_lock(txn->entries[i].lock_index, (uint32_t)txn->id);
+            txn->entries[i].locked = false;
+        }
+    }
+    
+    /* Release reserved resources */
+	hal_txn_unreserve(txn);
+
+    txn_transition_state(txn, HAL_TXN_STATE_ABORTED);
+    return HAL_SUCCESS;
+}
+
 /* ============================================================================
  * Operation Application
  * ============================================================================ */
@@ -765,25 +799,31 @@ hal_status_t hal_txn_abort(hal_txn_t *txn)
 		return HAL_E_NULL;
 	}
     
-    if (txn->state == HAL_TXN_STATE_ABORTED)   return HAL_SUCCESS;
-        txn->state == HAL_TXN_STATE_COMMITTED) return HAL_E_FAIL;
+    /* Already aborted transaction */
+    if (txn->state == HAL_TXN_STATE_ABORTED) {
+        return HAL_SUCCESS;
+    }
 
-    /* If we have applied operations, try to rollback */
+    /* ONLY abort PENDING or ACTIVE transactions (pre-commit cleanup) */
+    if (txn->state != HAL_TXN_STATE_PENDING && 
+        txn->state != HAL_TXN_STATE_ACTIVE) {
+        return HAL_E_FAIL;
+    }
+
     if (txn->applied_count > 0) {
         txn_do_rollback(txn);
     }
 
-    /* Release locks */
     for (size_t i = 0; i < txn->entry_count; i++) {
         if (txn->entries[i].locked) {
-            free_entry_lock(txn->entries[i].lock_index, txn->id);
+            free_entry_lock(txn->entries[i].lock_index, (uint32_t)txn->id);
             txn->entries[i].locked = false;
         }
     }
 
     /* Release reserved resources */
 	hal_txn_unreserve(txn);
-    
+
     txn_transition_state(txn, HAL_TXN_STATE_ABORTED);
     return HAL_SUCCESS;
 }
@@ -811,8 +851,8 @@ hal_status_t hal_txn_free(hal_txn_t *txn)
     }
 
 	/* Remove transaction from TXN list */
-	txn->prev->next = txn->next;
-	txn->next->prev = txn->prev;
+	if (txn->prev != NULL) txn->prev->next = txn->next;
+	if (txn->next != NULL) txn->next->prev = txn->prev;
 
     free(txn);
     return HAL_SUCCESS;

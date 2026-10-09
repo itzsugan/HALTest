@@ -133,6 +133,19 @@ test('integration', test_integration,
     timeout: 60,
 )
 
+# Transaction Tests
+test_txn = executable('test_txn',
+    'tests/test_txn.c',
+    include_directories: test_inc_dirs,
+    link_with: [hal_lib, asic_lib],
+    dependencies: [thread_dep],
+)
+
+test('txn_basic', test_txn,
+    args: ['--basic'],
+    timeout: 30,
+)
+
 # =============================================================================
 # Summary
 # =============================================================================
