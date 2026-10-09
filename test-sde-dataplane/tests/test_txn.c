@@ -769,6 +769,7 @@ int main(int argc, char *argv[])
     RUN_TEST(txn_abort_before_commit);
     RUN_TEST(txn_rollback_after_commit);
     RUN_TEST(txn_commit_failure_cleans_up);
+	RUN_TEST(txn_commit_asic_failure_cleans_up);
     RUN_TEST(txn_fdb_delete_missing_entry_releases_lock);
     RUN_TEST(txn_double_commit_fails);
     RUN_TEST(txn_rollback_fdb_add_removes_entry);
