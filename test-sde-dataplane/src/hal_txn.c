@@ -744,6 +744,14 @@ hal_status_t hal_txn_commit(hal_txn_t *txn)
     }
     
     /* Step 3: Mark resources as allocated */
+
+    /* Release all locks held by this transaction */
+    for (size_t i = 0; i < txn->entry_count; i++) {
+        if (txn->entries[i].locked) {
+            free_entry_lock(txn->entries[i].lock_index, (uint32_t)txn->id);
+            txn->entries[i].locked = false;
+        }
+    }
 	hal_txn_unreserve(txn);
 
     txn_transition_state(txn, HAL_TXN_STATE_COMMITTED);
@@ -793,6 +801,7 @@ hal_status_t hal_txn_abort(hal_txn_t *txn)
 
     /* ONLY abort PENDING or ACTIVE transactions (pre-commit cleanup) */
     if (txn->state != HAL_TXN_STATE_PENDING && 
+		txn->state != HAL_TXN_STATE_FAILED &&
         txn->state != HAL_TXN_STATE_ACTIVE) {
         return HAL_E_FAIL;
     }
