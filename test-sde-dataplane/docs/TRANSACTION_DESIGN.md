@@ -19,7 +19,7 @@ The transaction manager sits between the control plane and the ASIC-facing HAL t
 │ Journal      │  │ Lock Table  │  │ Resource     │
 │ Management   │  │ (8K entries)│  │ Pool Manager │
 │              │  │             │  │              │
-│ - Entries[]  │  │ Hash-based  │  │ Reserve/     │
+│ - Entries[]  │  │             │  │ Reserve/     │
 │ - States     │  │ per-entry   │  │ Unreserve    │
 │ - Rollback   │  │ locking     │  │              │
 └──────┬───────┘  └─────────────┘  └──────────────┘
@@ -34,9 +34,77 @@ The transaction manager sits between the control plane and the ASIC-facing HAL t
 
 ### Key data structures
 
-- `hal_txn_t`		  : transaction identity, state, options, operation journal, and stats.
-- `hal_txn_op_entry_t`: one journal entry with `op`, `table`, `entry`, `original`, and `applied` flag.
-- `txn_entry_lock_t`  : per-entry pessimistic lock keyed by (table + logical key).
+#### `hal_txn_t`
+
+Transaction identity, state, options, operation journal, and stats.
+
+```c
+typedef struct hal_txn_s {
+    uint64_t            id;             /* Unique transaction ID */
+    hal_txn_state_t     state;          /* Current state */
+    hal_txn_opts_t      opts;           /* Configuration options */
+    hal_time_us_t       start_time;     /* Start timestamp for timeout */
+    
+    /* Operation journal */
+    hal_txn_op_entry_t *entries;        /* Array of operations */
+    size_t              entry_count;    /* Current number of entries */
+    size_t              entry_capacity; /* Allocated capacity */
+    
+    /* Rollback tracking */
+    size_t              applied_count;  /* Number of ops successfully applied */
+
+	/* Locking index */
+
+    /* Resource reservations */
+    uint32_t            fdb_reserved;   /* FDB entries reserved */
+    uint32_t            route_reserved; /* Route entries reserved */
+    
+    /* Stats */
+    hal_txn_stats_t     stats;
+
+	hal_txn_t			*next;
+	hal_txn_t			*prev;
+} hal_txn_t;
+```
+
+#### `hal_txn_op_entry_t`
+
+One journal entry with `op`, `table`, `entry`, `original`, and `applied` flag.
+
+```c
+typedef struct hal_txn_op_entry_s {
+    hal_txn_op_t        op;             /* ADD/DELETE/UPDATE */
+    hal_txn_table_t     table;          /* FDB/ROUTE */
+    
+    union {
+        hal_fdb_entry_t     fdb;
+        hal_route_entry_t   route;
+    } entry;
+    
+    /* For rollback: stores original state for DELETE/UPDATE */
+    union {
+        hal_fdb_entry_t     fdb;
+        hal_route_entry_t   route;
+    } original;
+    
+    bool                applied;        /* Has this op been applied? */
+    uint32_t            lock_index;     /* Lock table index (if locked) */
+    bool                locked;         /* Is entry locked? */
+} hal_txn_op_entry_t;
+```
+
+#### `txn_entry_lock_t`
+
+Per-entry pessimistic lock keyed by (table + logical key).
+
+```c
+	typedef struct 	txn_entry_lock_a {
+		hal_txn_table_t		table;
+		uint64_t 			key;            /* key (MAC+VLAN or VRF+prefix+len) */
+		uint64_t 			owner_txn_id;   /* Transaction ID holding the lock */
+		bool 				locked;         /* Lock state: true if currently held */
+	} txn_entry_lock_t;
+```
 
 ### State machine
 
@@ -96,22 +164,30 @@ If the ASIC driver times out or a table operation fails during commit, the trans
 ## 4. Scale Considerations
 
 - Maximum concurrent transactions is bounded by the operation journal capacity and lock table size (TXN_LOCK_TABLE_SIZE).
-- Memory overhead is modest: each journal entry stores a compact operation record, entry info plus a snapshot for UPDATE/DELETE.
-- Resource reservation happens before commit so the transaction cannot over-allocate pool capacity.
+- Memory overhead is modest.
+	* Each journal entry stores a compact operation record, entry info plus a snapshot for UPDATE/DELETE.
+	* The memory cost is roughly the size of two entry unions per operation, not just the operation being performed.
+- Resource reservation happens before commit
+	* This tries to ensure capacity before applying changes, reducing the risk of a transaction running out of resources midway
+	* The implementation reserves based on the number of ADD operations; it does not currently net those against DELETE operations in the same transaction.
 - This is suitable for single-node control-plane use; high-scale multi-node or distributed transactions are out of scope.
-- Lock table is implemented using array which doesnt scale well.
+- Lock table doesnt scale well
+	* the current implementation scans a fixed array to find and check locks, so lock lookup and allocation are linear in the table size.
+	* Alternate option:
+		- Hash --> Hash collisions will lead to incorrect conflict.
+		- RB Tree would be a better choice, can support faster (table + logical key) based lookups.
 
 ## 5. Trade-offs and Future Work
 
 Chosen not to implement:
 - global transaction lock for simplicity and performance
-- optimistic concurrency because it is harder to reason about with rollback and ASIC-side mutation
-- distributed transactions or multi-device coordination
+- optimistic concurrency is not choosen since it detects conflicts during commit which may need rollback.
+	* Lock table coordinates only transaction managed operations. Direct table API calls do not use the lock table.
+	* So current design doesnt block those calls by lock table.
+- distributed transactions or multi-device coordination - simpler scope.
 - Lock table is not chosen to implemente with advanced data structures due to time limitation.
 
 Future improvements:
-- timeout-aware waiting instead of immediate busy-fail
-- per-table conflict groups for larger batch optimization
-- richer metrics for rollback failures and lock contention
-- explicit deadlock detection with waiter queues
+- timeout-aware waiting for conflicting entries instead of immediate busy-fail
+- distributed transactions or multi-device coordination.
 - Lock table can be implemented with RB tree for better scale and performance.
