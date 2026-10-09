@@ -524,11 +524,13 @@ hal_status_t hal_txn_begin(const hal_txn_opts_t *opts, hal_txn_t **txn)
     new_txn->state 			= HAL_TXN_STATE_PENDING;
 
 	/* Add transaction to TXN list */
+    pthread_mutex_lock(&g_txn_global_lock);
 	if (gp_txn_list != NULL) {
 		gp_txn_list->prev = new_txn;
 	}
 	new_txn->next 	= gp_txn_list;
 	gp_txn_list 	= new_txn;
+    pthread_mutex_unlock(&g_txn_global_lock);
 
     *txn = new_txn;
     return HAL_SUCCESS;
@@ -836,8 +838,18 @@ hal_status_t hal_txn_free(hal_txn_t *txn)
     }
 
 	/* Remove transaction from TXN list */
-	if (txn->prev != NULL) txn->prev->next = txn->next;
-	if (txn->next != NULL) txn->next->prev = txn->prev;
+
+    /* Remove transaction from TXN list */
+    pthread_mutex_lock(&g_txn_global_lock);
+    if (txn->prev != NULL) {
+        txn->prev->next = txn->next;
+    } else if (gp_txn_list == txn) {
+        gp_txn_list = txn->next;
+    }
+    if (txn->next != NULL) {
+        txn->next->prev = txn->prev;
+    }
+    pthread_mutex_unlock(&g_txn_global_lock);
 
     free(txn);
     return HAL_SUCCESS;
