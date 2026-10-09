@@ -50,6 +50,7 @@ hal_sources = files(
     'src/hal_fdb.c',
     'src/hal_route.c',
     'src/hal_resource.c',
+    'src/hal_txn.c',
 )
 
 hal_lib = static_library('hal',
