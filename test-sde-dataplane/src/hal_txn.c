@@ -664,13 +664,15 @@ hal_status_t hal_txn_add_route(hal_txn_t *txn, hal_txn_op_t op,
 						   entry->prefix_len,
 						   &old_entry);
 		if (rv != HAL_SUCCESS) {
+			free_entry_lock(lock_idx, (uint32_t)txn->id);
+			op_entry->locked = false;
 			return rv;
 		}
         op_entry->original.route = old_entry;
     }
 
     txn->entry_count++;
-    
+
     /* Update stats */
     txn->stats.total_operations++;
     if (op == HAL_TXN_OP_ADD) {
@@ -763,11 +765,11 @@ hal_status_t hal_txn_rollback(hal_txn_t *txn)
 {
     if (!txn) return HAL_E_NULL;
     
-    /* ONLY rollback COMMITTED transactions (post-commit reversal) */
-    if (txn->state != HAL_TXN_STATE_COMMITTED) {
+    if (txn->state != HAL_TXN_STATE_COMMITTED && 
+		txn->state != HAL_TXN_STATE_FAILED) {
         return HAL_E_FAIL;
     }
-    
+
     if (txn->applied_count > 0) {
         txn_do_rollback(txn);
     }
