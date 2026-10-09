@@ -347,6 +347,43 @@ TEST(txn_commit_failure_cleans_up)
     hal_txn_free(txn);
 }
 
+TEST(txn_commit_asic_failure_cleans_up)
+{
+    hal_txn_t *txn = NULL;
+    hal_fdb_entry_t entry;
+    hal_route_entry_t rt_entry;
+
+    hal_txn_begin(NULL, &txn);
+
+    make_route_entry(&rt_entry, 74, 24, 1, 2);
+    ASSERT_SUCCESS(hal_txn_add_route(txn, HAL_TXN_OP_ADD, &rt_entry));
+    
+    make_fdb_entry(&entry, 24, 100, 1);
+    ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &entry));
+
+	/* Inject ASIC error */
+    asic_inject_error(0, HAL_E_PARAM, 1);
+
+	/* Commit and check error */
+    hal_status_t rv = hal_txn_commit(txn);
+    ASSERT_STATUS(HAL_E_PARAM, rv);
+    ASSERT_EQ(HAL_TXN_STATE_FAILED, hal_txn_get_state(txn));
+
+    make_fdb_entry(&entry, 24, 100, 1);
+    rv = hal_fdb_get(entry.mac, entry.vlan_id, &entry);
+    ASSERT_STATUS(HAL_E_NOT_FOUND, rv);
+
+    make_route_entry(&rt_entry, 74, 24, 1, 2);
+    rv = hal_route_get(rt_entry.vrf_id, rt_entry.prefix, rt_entry.prefix_len, &rt_entry);
+    ASSERT_STATUS(HAL_E_NOT_FOUND, rv);
+
+    ASSERT_SUCCESS(hal_txn_abort(txn));
+    ASSERT_EQ(HAL_TXN_STATE_ABORTED, hal_txn_get_state(txn));
+
+    hal_txn_free(txn);
+}
+
+
 TEST(txn_fdb_delete_missing_entry_releases_lock)
 {
     hal_txn_t *txn = NULL;

@@ -753,11 +753,11 @@ hal_status_t hal_txn_commit(hal_txn_t *txn)
             
             if (txn->opts.auto_rollback) {
                 txn_do_rollback(txn);
+				txn_release_locks(txn);
+				hal_txn_unreserve(txn);
             }
-            txn_release_locks(txn);
-            hal_txn_unreserve(txn);
-		txn_transition_state(txn, HAL_TXN_STATE_FAILED);
-		return rv;
+			txn_transition_state(txn, HAL_TXN_STATE_FAILED);
+			return rv;
         }
         op_entry->applied = true;
         txn->applied_count++;
