@@ -556,7 +556,7 @@ int main(int argc, char *argv[])
     
     printf(TF_YELLOW("Basic Lifecycle Tests:\n"));
     RUN_TEST(txn_begin_basic);
-    RUN_TEST(txn_begin_null_pointer);
+    RUN_TEST(txn_begin_null_txn_pointer);
     RUN_TEST(txn_begin_with_options);
     RUN_TEST(txn_free_committed);
     RUN_TEST(txn_free_active_fails);
