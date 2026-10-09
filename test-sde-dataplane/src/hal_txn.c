@@ -581,8 +581,8 @@ hal_status_t hal_txn_add_fdb(hal_txn_t *txn, hal_txn_op_t op,
     op_entry->lock_index = lock_idx;
     op_entry->locked = true;
 
-    /* For DELETE ops, take snapshot of entry first */
-    if (op == HAL_TXN_OP_DELETE) {
+    /* For UPDATE/DELETE ops, take snapshot of entry first */
+    if ((op == HAL_TXN_OP_UPDATE) || (op == HAL_TXN_OP_DELETE)) {
 		hal_fdb_entry_t old_entry;
         rv = hal_fdb_get(entry->mac, entry->vlan_id, &old_entry);
 		if (rv != HAL_SUCCESS) {
@@ -657,7 +657,7 @@ hal_status_t hal_txn_add_route(hal_txn_t *txn, hal_txn_op_t op,
     op_entry->lock_index = lock_idx;
     op_entry->locked = true;
     
-    if (op == HAL_TXN_OP_DELETE) {
+    if ((op == HAL_TXN_OP_UPDATE) || (op == HAL_TXN_OP_DELETE)) {
 		hal_route_entry_t old_entry; 
 		rv = hal_route_get(entry->vrf_id,
 						   entry->prefix,
