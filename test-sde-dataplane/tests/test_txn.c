@@ -345,6 +345,8 @@ TEST(txn_commit_failure_cleans_up)
     ASSERT_EQ(HAL_TXN_STATE_ABORTED, hal_txn_get_state(txn));
 
     hal_txn_free(txn);
+    rv = hal_fdb_delete(entry.mac, entry.vlan_id);
+    ASSERT_SUCCESS(rv);
 }
 
 TEST(txn_commit_asic_failure_cleans_up)
