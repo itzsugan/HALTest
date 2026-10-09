@@ -316,11 +316,16 @@ TEST(txn_commit_failure_cleans_up)
 {
     hal_txn_t *txn = NULL;
     hal_fdb_entry_t entry;
+    hal_route_entry_t entry;
 
     make_fdb_entry(&entry, 24, 100, 1);
     ASSERT_SUCCESS(hal_fdb_add(&entry));
 
     hal_txn_begin(NULL, &txn);
+
+    make_route_entry(&entry, 74, 24, 1, 2);
+    ASSERT_SUCCESS(hal_txn_add_route(txn, HAL_TXN_OP_ADD, &entry));
+    
     make_fdb_entry(&entry, 24, 100, 1);
     ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &entry));
 
@@ -331,6 +336,10 @@ TEST(txn_commit_failure_cleans_up)
     make_fdb_entry(&entry, 24, 100, 1);
     rv = hal_fdb_get(entry.mac, entry.vlan_id, &entry);
     ASSERT_SUCCESS(rv);
+
+    make_route_entry(&entry, 74, 24, 1, 2);
+    hal_status_t rv = hal_route_get(entry.vrf_id, entry.prefix, entry.prefix_len, &entry);
+    ASSERT_STATUS(HAL_E_NOT_FOUND, rv);
 
     ASSERT_SUCCESS(hal_txn_abort(txn));
     ASSERT_EQ(HAL_TXN_STATE_ABORTED, hal_txn_get_state(txn));

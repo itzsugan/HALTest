@@ -131,7 +131,6 @@ Per-entry pessimistic lock keyed by (table + logical key).
        └───┬────┘  └─────────┘ └──────────┘
            │                        ▲
            └───rollback()/abort()───┘
-
 ```
 
 
@@ -159,7 +158,9 @@ Transaction safety is enforced with inverse operations:
 
 Rollback is best-effort: it runs in reverse order and continues if a single inverse operation fails. The transaction then releases locks and returns the failed status to the caller.
 
-If the ASIC driver times out or a table operation fails during commit, the transaction is marked `FAILED`, previously applied operations are undone, and any reserved resources are released. Applications can then call `hal_txn_rollback()` or `hal_txn_abort()` to finalize cleanup.
+If the ASIC driver times out or a table operation fails during commit, the transaction is marked `FAILED`, previously applied operations are undone, and any reserved resources are released when auto_rollback is true. When auto_rollback is false, Applications should then call `hal_txn_rollback()` or `hal_txn_abort()` to finalize cleanup.
+
+
 
 ## 4. Scale Considerations
 
