@@ -338,6 +338,83 @@ static void hal_txn_unreserve (hal_txn_t *txn)
     }
 }
 
+static hal_status_t txn_do_rollback(hal_txn_t *txn)
+{
+    if (!txn) {
+		return HAL_E_NULL;
+	}
+    
+    /* Rollback in reverse order */
+    for (int i = (int)txn->applied_count - 1; i >= 0; i--) {
+        hal_txn_op_entry_t *op_entry = &txn->entries[i];
+
+        if (!op_entry->applied) {
+            continue;
+        }
+        
+        hal_status_t rv = HAL_SUCCESS;
+        
+        switch (op_entry->table) {
+            case HAL_TXN_TABLE_FDB:
+                rv = rollback_fdb_entry(op_entry);
+                break;
+            case HAL_TXN_TABLE_ROUTE:
+                rv = rollback_route_entry(op_entry);
+                break;
+            default:
+                rv = HAL_E_PARAM;
+        }
+        
+        if (rv == HAL_SUCCESS) {
+			op_entry->applied = false;
+			txn->applied_count--;
+		}
+    }
+
+    txn->applied_count = 0;
+    return HAL_SUCCESS;
+}
+
+
+static hal_status_t apply_fdb_operation(const hal_txn_op_entry_t *op_entry)
+{
+    if (!op_entry) {
+		return HAL_E_NULL;
+	}
+
+    switch (op_entry->op) {
+        case HAL_TXN_OP_ADD:
+            return hal_fdb_add((hal_fdb_entry_t *)&op_entry->entry.fdb);
+        case HAL_TXN_OP_DELETE:
+            return hal_fdb_delete(op_entry->entry.fdb.mac, op_entry->entry.fdb.vlan_id);
+        case HAL_TXN_OP_UPDATE:
+            return hal_fdb_update(&op_entry->entry.fdb);
+        default:
+            return HAL_E_PARAM;
+    }
+}
+
+static hal_status_t apply_route_operation(const hal_txn_op_entry_t *op_entry)
+{
+    if (!op_entry) {
+		return HAL_E_NULL;
+	}
+
+    switch (op_entry->op) {
+        case HAL_TXN_OP_ADD:
+            return hal_route_add((hal_route_entry_t *)&op_entry->entry.route);
+        case HAL_TXN_OP_DELETE:
+            return hal_route_delete(op_entry->entry.route.vrf_id,
+                                    op_entry->entry.route.prefix,
+                                    op_entry->entry.route.prefix_len);
+        case HAL_TXN_OP_UPDATE:
+            return hal_route_update(&op_entry->entry.route);
+        default:
+            return HAL_E_PARAM;
+    }
+}
+
+
 /* ============================================================================
  * Public Transaction API
  * ============================================================================ */
@@ -441,7 +518,7 @@ hal_status_t hal_txn_add_fdb(hal_txn_t *txn, hal_txn_op_t op,
     /* For DELETE ops, take snapshot of entry first */
     if (op == HAL_TXN_OP_DELETE) {
 		hal_fdb_entry_t old_entry;
-        rv = hal_fdb_get(entry->mac, entry->vlan, &old_entry);
+        rv = hal_fdb_get(entry->mac, entry->vlan_id, &old_entry);
 		if (rv != HAL_SUCCESS) {
 			return rv;
 		}
@@ -467,7 +544,6 @@ hal_status_t hal_txn_add_fdb(hal_txn_t *txn, hal_txn_op_t op,
     
     return HAL_SUCCESS;
 }
-
 
 
 hal_status_t hal_txn_add_route(hal_txn_t *txn, hal_txn_op_t op,
@@ -685,42 +761,6 @@ static hal_status_t rollback_route_entry(const hal_txn_op_entry_t *op_entry)
     return rv;
 }
 
-static hal_status_t txn_do_rollback(hal_txn_t *txn)
-{
-    if (!txn) {
-		return HAL_E_NULL;
-	}
-    
-    /* Rollback in reverse order */
-    for (int i = (int)txn->applied_count - 1; i >= 0; i--) {
-        hal_txn_op_entry_t *op_entry = &txn->entries[i];
-
-        if (!op_entry->applied) {
-            continue;
-        }
-        
-        hal_status_t rv = HAL_SUCCESS;
-        
-        switch (op_entry->table) {
-            case HAL_TXN_TABLE_FDB:
-                rv = rollback_fdb_entry(op_entry);
-                break;
-            case HAL_TXN_TABLE_ROUTE:
-                rv = rollback_route_entry(op_entry);
-                break;
-            default:
-                rv = HAL_E_PARAM;
-        }
-        
-        if (rv == HAL_SUCCESS) {
-			op_entry->applied = false;
-			txn->applied_count--;
-		}
-    }
-
-    txn->applied_count = 0;
-    return HAL_SUCCESS;
-}
 
 hal_status_t hal_txn_rollback(hal_txn_t *txn)
 {
@@ -748,48 +788,6 @@ hal_status_t hal_txn_rollback(hal_txn_t *txn)
 
     txn_transition_state(txn, HAL_TXN_STATE_ABORTED);
     return HAL_SUCCESS;
-}
-
-/* ============================================================================
- * Operation Application
- * ============================================================================ */
-
-static hal_status_t apply_fdb_operation(const hal_txn_op_entry_t *op_entry)
-{
-    if (!op_entry) {
-		return HAL_E_NULL;
-	}
-
-    switch (op_entry->op) {
-        case HAL_TXN_OP_ADD:
-            return hal_fdb_add((hal_fdb_entry_t *)&op_entry->entry.fdb);
-        case HAL_TXN_OP_DELETE:
-            return hal_fdb_delete(op_entry->entry.fdb.mac, op_entry->entry.fdb.vlan_id);
-        case HAL_TXN_OP_UPDATE:
-            return hal_fdb_update(&op_entry->entry.fdb);
-        default:
-            return HAL_E_PARAM;
-    }
-}
-
-static hal_status_t apply_route_operation(const hal_txn_op_entry_t *op_entry)
-{
-    if (!op_entry) {
-		return HAL_E_NULL;
-	}
-
-    switch (op_entry->op) {
-        case HAL_TXN_OP_ADD:
-            return hal_route_add((hal_route_entry_t *)&op_entry->entry.route);
-        case HAL_TXN_OP_DELETE:
-            return hal_route_delete(op_entry->entry.route.vrf_id,
-                                    op_entry->entry.route.prefix,
-                                    op_entry->entry.route.prefix_len);
-        case HAL_TXN_OP_UPDATE:
-            return hal_route_update(&op_entry->entry.route);
-        default:
-            return HAL_E_PARAM;
-    }
 }
 
 
