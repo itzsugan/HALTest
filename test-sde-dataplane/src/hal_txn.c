@@ -491,8 +491,8 @@ static hal_status_t txn_do_rollback(hal_txn_t *txn)
 			op_entry->applied = false;
 			txn->applied_count--;
         } else {
-            fprintf(stderr, "hal_txn: rollback failed for operation %zu: %s\n",
-                    entry_index, hal_status_str(rv));
+            HAL_TXN_LOG("hal_txn: rollback failed for operation %zu: %s\n",
+                         entry_index, hal_status_str(rv));
             if (first_error == HAL_SUCCESS) {
                 first_error = rv;
             }
@@ -553,15 +553,25 @@ hal_status_t hal_txn_begin(const hal_txn_opts_t *opts, hal_txn_t **txn)
 	}
     *txn = NULL;
 
+    pthread_mutex_lock(&g_txn_global_lock);
+    if (g_txn_count >= TXN_MAX_CONCURRENT_TRANSACTIONS) {
+        pthread_mutex_unlock(&g_txn_global_lock);
+        return HAL_E_RESOURCE;
+    }
+
     hal_txn_t *new_txn = calloc(1, sizeof(hal_txn_t));
     if (!new_txn) {
+        pthread_mutex_unlock(&g_txn_global_lock);
         return HAL_E_MEMORY;
     }
+
+    new_txn->id = g_txn_next_id++;
     
     /* Allocate initial journal capacity */
     new_txn->entries = malloc(TXN_INIT_ENTRY_CAPACITY * sizeof(hal_txn_op_entry_t));
     if (!new_txn->entries) {
         free(new_txn);
+        pthread_mutex_unlock(&g_txn_global_lock);
         return HAL_E_MEMORY;
     }
     
@@ -579,16 +589,6 @@ hal_status_t hal_txn_begin(const hal_txn_opts_t *opts, hal_txn_t **txn)
     new_txn->entry_count 	= 0;
     new_txn->state 			= HAL_TXN_STATE_PENDING;
 
-    /* Keep allocation outside the global lock; protect shared registry updates. */
-    pthread_mutex_lock(&g_txn_global_lock);
-    if (g_txn_count >= TXN_MAX_CONCURRENT_TRANSACTIONS) {
-        pthread_mutex_unlock(&g_txn_global_lock);
-        free(new_txn->entries);
-        free(new_txn);
-        return HAL_E_RESOURCE;
-    }
-
-    new_txn->id = g_txn_next_id++;
 
 	/* Add transaction to TXN list */
 	if (gp_txn_list != NULL) {
@@ -816,8 +816,7 @@ hal_status_t hal_txn_commit(hal_txn_t *txn)
                     txn_release_locks(txn);
                     hal_txn_unreserve(txn);
                 } else {
-                    fprintf(stderr,
-                            "hal_txn: commit failed (%s), rollback incomplete (%s)\n",
+                    HAL_TXN_LOG("hal_txn: commit failed (%s), rollback incomplete (%s)\n",
                             hal_status_str(rv), hal_status_str(rollback_rv));
                 }
             }
@@ -854,8 +853,8 @@ hal_status_t hal_txn_rollback(hal_txn_t *txn)
 
         hal_status_t rv = txn_do_rollback(txn);
         if (rv != HAL_SUCCESS) {
-            fprintf(stderr, "hal_txn: rollback incomplete (%s)\n",
-                    hal_status_str(rv));
+            HAL_TXN_LOG("hal_txn: rollback incomplete (%s)\n",
+                        hal_status_str(rv));
             txn_transition_state(txn, HAL_TXN_STATE_FAILED);
             return rv;
         }
@@ -895,8 +894,8 @@ hal_status_t hal_txn_abort(hal_txn_t *txn)
 
         hal_status_t rv = txn_do_rollback(txn);
         if (rv != HAL_SUCCESS) {
-            fprintf(stderr, "hal_txn: abort rollback incomplete (%s)\n",
-                    hal_status_str(rv));
+            HAL_TXN_LOG("hal_txn: abort rollback incomplete (%s)\n",
+                        hal_status_str(rv));
             txn_transition_state(txn, HAL_TXN_STATE_FAILED);
             return rv;
         }

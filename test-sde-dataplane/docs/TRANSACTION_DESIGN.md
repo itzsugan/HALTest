@@ -146,6 +146,7 @@ This prevents transaction-managed operations from taking the same key concurrent
 
 Optimistic locking was not selected because it discovers conflicts at commit, potentially after ASIC operations have been applied and need to be undone. Pessimistic locking avoids that late conflict path, at the cost of holding locks while a transaction is being assembled.
 
+
 ## 3. Failure Handling
 
 Transaction safety is enforced with inverse operations:
@@ -179,12 +180,14 @@ The configured duration timeout is checked when adding an operation, before comm
 
 Chosen not to implement:
 - A global transaction lock, which would serialize operations on unrelated keys.
-- Optimistic concurrency, because late conflict detection can require undoing applied ASIC changes.
+- optimistic concurrency is not choosen since it detects conflicts during commit which may need rollback.
+       * Lock table coordinates only transaction managed operations.
+       * Direct table API calls do not use the lock table. So current design doesnt block those calls by lock table.
 - Distributed transactions or multi-device coordination, which exceed this HAL's single-process scope.
 - A hash/tree lock index, to keep the initial implementation simple and bounded.
 
 Future improvements:
 - Add timeout-aware waiting for conflicting entries; currently conflicts return `HAL_E_BUSY` immediately.
+- Replace the linear lock-array scans with a collision-safe hash table or balanced tree for better scale.
 - Add distributed transactions or multi-device coordination if the system requires cross-device atomicity.
-- Replace the linear lock-array scans with a collision-safe hash table or balanced tree if profiling shows contention/lookup cost is material.
 - Add aggregate timing, contention, reservation, and rollback-failure metrics.
