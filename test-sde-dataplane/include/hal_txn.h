@@ -22,6 +22,7 @@
 extern "C" {
 #endif
 
+#include <stdio.h>
 #include <pthread.h>
 
 /* ============================================================================
@@ -36,6 +37,9 @@ extern "C" {
 
 /* Global lock table for all entries */
 #define TXN_LOCK_TABLE_SIZE 8192
+
+
+#define HAL_TXN_LOG printf
 
 /* ============================================================================
  * TYPES and ENUMS
