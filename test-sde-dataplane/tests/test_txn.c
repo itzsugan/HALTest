@@ -12,9 +12,11 @@
 #include "hal_route.h"
 #include "hal_types.h"
 #include "hal_resource.h"
+#include "asic/asic_driver.h"
 
 #include <string.h>
 #include <pthread.h>
+#include <time.h>
 
 /* ============================================================================
  * Test Fixtures
@@ -106,6 +108,23 @@ TEST(txn_begin_with_options)
     ASSERT_EQ(HAL_TXN_STATE_PENDING, hal_txn_get_state(txn));
     
     hal_txn_free(txn);
+}
+
+TEST(txn_begin_enforces_live_transaction_limit)
+{
+    hal_txn_t *transactions[TXN_MAX_CONCURRENT_TRANSACTIONS];
+    hal_txn_t *overflow = NULL;
+
+    for (uint32_t i = 0; i < TXN_MAX_CONCURRENT_TRANSACTIONS; i++) {
+        ASSERT_SUCCESS(hal_txn_begin(NULL, &transactions[i]));
+    }
+
+    ASSERT_STATUS(HAL_E_RESOURCE, hal_txn_begin(NULL, &overflow));
+    ASSERT_NULL(overflow);
+
+    for (uint32_t i = 0; i < TXN_MAX_CONCURRENT_TRANSACTIONS; i++) {
+        ASSERT_SUCCESS(hal_txn_free(transactions[i]));
+    }
 }
 
 TEST(txn_free_committed)
@@ -274,6 +293,43 @@ TEST(txn_commit_empty_transaction)
     hal_txn_free(txn);
 }
 
+TEST(txn_commit_resource_exhaustion)
+{
+    hal_resource_pool_t *fdb_pool =
+        hal_resource_get_pool(HAL_RESOURCE_FDB_ENTRY);
+    hal_resource_pool_t *route_pool =
+        hal_resource_get_pool(HAL_RESOURCE_ROUTE_ENTRY);
+    hal_txn_t *txn = NULL;
+    hal_fdb_entry_t fdb;
+    hal_route_entry_t route;
+
+    ASSERT_NOT_NULL(fdb_pool);
+    ASSERT_NOT_NULL(route_pool);
+
+    ASSERT_SUCCESS(hal_resource_reserve(fdb_pool, test_config.fdb_size));
+    ASSERT_SUCCESS(hal_txn_begin(NULL, &txn));
+    make_fdb_entry(&fdb, 33, 100, 1);
+    ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &fdb));
+    ASSERT_STATUS(HAL_E_RESOURCE, hal_txn_commit(txn));
+    ASSERT_SUCCESS(hal_resource_unreserve(fdb_pool, test_config.fdb_size));
+    ASSERT_SUCCESS(hal_txn_abort(txn));
+    ASSERT_SUCCESS(hal_txn_free(txn));
+    make_fdb_entry(&fdb, 33, 100, 1);
+    ASSERT_STATUS(HAL_E_NOT_FOUND, hal_fdb_get(fdb.mac, fdb.vlan_id, &fdb));
+
+    ASSERT_SUCCESS(hal_resource_reserve(route_pool, test_config.route_size));
+    ASSERT_SUCCESS(hal_txn_begin(NULL, &txn));
+    make_route_entry(&route, 79, 24, 1, 2);
+    ASSERT_SUCCESS(hal_txn_add_route(txn, HAL_TXN_OP_ADD, &route));
+    ASSERT_STATUS(HAL_E_RESOURCE, hal_txn_commit(txn));
+    ASSERT_SUCCESS(hal_resource_unreserve(route_pool, test_config.route_size));
+    ASSERT_SUCCESS(hal_txn_abort(txn));
+    ASSERT_SUCCESS(hal_txn_free(txn));
+    make_route_entry(&route, 79, 24, 1, 2);
+    ASSERT_STATUS(HAL_E_NOT_FOUND, hal_route_get(route.vrf_id, route.prefix,
+                                                  route.prefix_len, &route));
+}
+
 /* ============================================================================
  * Rollback Tests
  * ============================================================================ */
@@ -383,6 +439,156 @@ TEST(txn_commit_asic_failure_cleans_up)
     ASSERT_EQ(HAL_TXN_STATE_ABORTED, hal_txn_get_state(txn));
 
     hal_txn_free(txn);
+}
+
+TEST(txn_manual_rollback_retains_locks_after_commit_failure)
+{
+    hal_txn_t *txn = NULL;
+    hal_txn_t *contender = NULL;
+    hal_txn_opts_t opts = { .timeout_ms = 0, .auto_rollback = false };
+    hal_fdb_entry_t duplicate;
+    hal_route_entry_t route;
+
+    make_fdb_entry(&duplicate, 26, 100, 1);
+    ASSERT_SUCCESS(hal_fdb_add(&duplicate));
+
+    ASSERT_SUCCESS(hal_txn_begin(&opts, &txn));
+    make_route_entry(&route, 75, 24, 1, 2);
+    ASSERT_SUCCESS(hal_txn_add_route(txn, HAL_TXN_OP_ADD, &route));
+    make_fdb_entry(&duplicate, 26, 100, 1);
+    ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &duplicate));
+
+    ASSERT_STATUS(HAL_E_EXISTS, hal_txn_commit(txn));
+    ASSERT_EQ(HAL_TXN_STATE_FAILED, hal_txn_get_state(txn));
+
+    ASSERT_SUCCESS(hal_txn_begin(NULL, &contender));
+    ASSERT_STATUS(HAL_E_BUSY, hal_txn_add_route(contender, HAL_TXN_OP_ADD, &route));
+    ASSERT_SUCCESS(hal_txn_abort(contender));
+    ASSERT_SUCCESS(hal_txn_free(contender));
+
+    ASSERT_SUCCESS(hal_txn_rollback(txn));
+    ASSERT_EQ(HAL_TXN_STATE_ABORTED, hal_txn_get_state(txn));
+    ASSERT_SUCCESS(hal_txn_free(txn));
+
+    make_route_entry(&route, 75, 24, 1, 2);
+    ASSERT_STATUS(HAL_E_NOT_FOUND,
+                  hal_route_get(route.vrf_id, route.prefix, route.prefix_len, &route));
+    make_fdb_entry(&duplicate, 26, 100, 1);
+    ASSERT_SUCCESS(hal_fdb_delete(duplicate.mac, duplicate.vlan_id));
+}
+
+TEST(txn_rollback_failure_is_reported_and_retryable)
+{
+    hal_txn_t *txn = NULL;
+    hal_txn_t *contender = NULL;
+    hal_route_entry_t route;
+    hal_fdb_entry_t fdb;
+
+    ASSERT_SUCCESS(hal_txn_begin(NULL, &txn));
+    make_route_entry(&route, 76, 24, 1, 2);
+    ASSERT_SUCCESS(hal_txn_add_route(txn, HAL_TXN_OP_ADD, &route));
+    make_fdb_entry(&fdb, 27, 100, 1);
+    ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &fdb));
+    ASSERT_SUCCESS(hal_txn_commit(txn));
+
+    /* The rollback visits the FDB operation first; fail that inverse, then continue. */
+    asic_inject_error(0, HAL_E_PARAM, 1);
+    ASSERT_STATUS(HAL_E_PARAM, hal_txn_rollback(txn));
+    ASSERT_EQ(HAL_TXN_STATE_FAILED, hal_txn_get_state(txn));
+    ASSERT_STATUS(HAL_E_BUSY, hal_txn_free(txn));
+
+    ASSERT_SUCCESS(hal_txn_begin(NULL, &contender));
+    make_fdb_entry(&fdb, 27, 100, 1);
+    ASSERT_STATUS(HAL_E_BUSY, hal_txn_add_fdb(contender, HAL_TXN_OP_DELETE, &fdb));
+    ASSERT_SUCCESS(hal_txn_abort(contender));
+    ASSERT_SUCCESS(hal_txn_free(contender));
+
+    make_route_entry(&route, 76, 24, 1, 2);
+    ASSERT_STATUS(HAL_E_NOT_FOUND,
+                  hal_route_get(route.vrf_id, route.prefix, route.prefix_len, &route));
+    make_fdb_entry(&fdb, 27, 100, 1);
+    ASSERT_SUCCESS(hal_fdb_get(fdb.mac, fdb.vlan_id, &fdb));
+
+    ASSERT_SUCCESS(hal_txn_rollback(txn));
+    ASSERT_EQ(HAL_TXN_STATE_ABORTED, hal_txn_get_state(txn));
+    ASSERT_SUCCESS(hal_txn_free(txn));
+
+    make_fdb_entry(&fdb, 27, 100, 1);
+    ASSERT_STATUS(HAL_E_NOT_FOUND, hal_fdb_get(fdb.mac, fdb.vlan_id, &fdb));
+}
+
+TEST(txn_failed_add_keeps_prior_staged_operations)
+{
+    hal_txn_t *txn = NULL;
+    hal_fdb_entry_t staged;
+    hal_fdb_entry_t missing;
+
+    ASSERT_SUCCESS(hal_txn_begin(NULL, &txn));
+    make_fdb_entry(&staged, 28, 100, 1);
+    ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &staged));
+
+    make_fdb_entry(&missing, 29, 100, 1);
+    ASSERT_STATUS(HAL_E_NOT_FOUND,
+                  hal_txn_add_fdb(txn, HAL_TXN_OP_DELETE, &missing));
+    ASSERT_EQ(HAL_TXN_STATE_ACTIVE, hal_txn_get_state(txn));
+
+    /* The failed add releases its own lock; another transaction can use that key. */
+    hal_txn_t *other = NULL;
+    ASSERT_SUCCESS(hal_txn_begin(NULL, &other));
+    ASSERT_SUCCESS(hal_txn_add_fdb(other, HAL_TXN_OP_ADD, &missing));
+    ASSERT_SUCCESS(hal_txn_abort(other));
+    ASSERT_SUCCESS(hal_txn_free(other));
+
+    ASSERT_SUCCESS(hal_txn_commit(txn));
+    ASSERT_SUCCESS(hal_txn_free(txn));
+    make_fdb_entry(&staged, 28, 100, 1);
+    ASSERT_SUCCESS(hal_fdb_delete(staged.mac, staged.vlan_id));
+}
+
+TEST(txn_commit_timeout_does_not_apply_operations)
+{
+    hal_txn_t *txn = NULL;
+    hal_txn_opts_t opts = { .timeout_ms = 1, .auto_rollback = true };
+    hal_fdb_entry_t entry;
+    struct timespec delay = { .tv_sec = 0, .tv_nsec = 5 * 1000 * 1000 };
+
+    ASSERT_SUCCESS(hal_txn_begin(&opts, &txn));
+    make_fdb_entry(&entry, 30, 100, 1);
+    ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &entry));
+    nanosleep(&delay, NULL);
+
+    ASSERT_STATUS(HAL_E_TIMEOUT, hal_txn_commit(txn));
+    ASSERT_EQ(HAL_TXN_STATE_ACTIVE, hal_txn_get_state(txn));
+    ASSERT_SUCCESS(hal_txn_abort(txn));
+    ASSERT_SUCCESS(hal_txn_free(txn));
+
+    make_fdb_entry(&entry, 30, 100, 1);
+    ASSERT_STATUS(HAL_E_NOT_FOUND, hal_fdb_get(entry.mac, entry.vlan_id, &entry));
+}
+
+TEST(txn_commit_timeout_mid_batch_rolls_back)
+{
+    hal_txn_t *txn = NULL;
+    hal_txn_opts_t opts = { .timeout_ms = 100, .auto_rollback = true };
+    hal_route_entry_t route;
+    hal_fdb_entry_t fdb;
+
+    ASSERT_SUCCESS(hal_txn_begin(&opts, &txn));
+    make_route_entry(&route, 78, 24, 1, 2);
+    ASSERT_SUCCESS(hal_txn_add_route(txn, HAL_TXN_OP_ADD, &route));
+    make_fdb_entry(&fdb, 32, 100, 1);
+    ASSERT_SUCCESS(hal_txn_add_fdb(txn, HAL_TXN_OP_ADD, &fdb));
+
+    asic_set_latency(0, 150000);
+    ASSERT_STATUS(HAL_E_TIMEOUT, hal_txn_commit(txn));
+    asic_set_latency(0, 0);
+    ASSERT_EQ(HAL_TXN_STATE_FAILED, hal_txn_get_state(txn));
+
+    make_route_entry(&route, 78, 24, 1, 2);
+    ASSERT_STATUS(HAL_E_NOT_FOUND, hal_route_get(route.vrf_id, route.prefix,
+                                                  route.prefix_len, &route));
+    ASSERT_SUCCESS(hal_txn_abort(txn));
+    ASSERT_SUCCESS(hal_txn_free(txn));
 }
 
 
@@ -753,6 +959,7 @@ int main(int argc, char *argv[])
     RUN_TEST(txn_begin_basic);
     RUN_TEST(txn_begin_null_txn_pointer);
     RUN_TEST(txn_begin_with_options);
+    RUN_TEST(txn_begin_enforces_live_transaction_limit);
     RUN_TEST(txn_free_committed);
     RUN_TEST(txn_free_active);
     
@@ -766,12 +973,18 @@ int main(int argc, char *argv[])
     RUN_TEST(txn_commit_single_fdb_add);
     RUN_TEST(txn_commit_multiple_operations);
     RUN_TEST(txn_commit_empty_transaction);
+    RUN_TEST(txn_commit_resource_exhaustion);
     
     printf(TF_YELLOW("\nRollback Tests:\n"));
     RUN_TEST(txn_abort_before_commit);
     RUN_TEST(txn_rollback_after_commit);
     RUN_TEST(txn_commit_failure_cleans_up);
 	RUN_TEST(txn_commit_asic_failure_cleans_up);
+    RUN_TEST(txn_manual_rollback_retains_locks_after_commit_failure);
+    RUN_TEST(txn_rollback_failure_is_reported_and_retryable);
+    RUN_TEST(txn_failed_add_keeps_prior_staged_operations);
+    RUN_TEST(txn_commit_timeout_does_not_apply_operations);
+    RUN_TEST(txn_commit_timeout_mid_batch_rolls_back);
     RUN_TEST(txn_fdb_delete_missing_entry_releases_lock);
     RUN_TEST(txn_double_commit_fails);
     RUN_TEST(txn_rollback_fdb_add_removes_entry);

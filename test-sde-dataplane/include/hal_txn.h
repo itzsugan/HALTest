@@ -32,6 +32,7 @@ extern "C" {
 #define TXN_INIT_ENTRY_CAPACITY		16
 #define TXN_LOCK_TIMEOUT_MS     	5000    /* Lock acquisition timeout */
 #define TXN_DEFAULT_TIMEOUT_MS  	0       /* No timeout by default */
+#define TXN_MAX_CONCURRENT_TRANSACTIONS 1024
 
 /* Global lock table for all entries */
 #define TXN_LOCK_TABLE_SIZE 8192
@@ -72,7 +73,7 @@ typedef enum hal_txn_state_e {
     HAL_TXN_STATE_PENDING,   /* Initialized, accepting operations */
     HAL_TXN_STATE_ACTIVE,    /* Operations being applied */
     HAL_TXN_STATE_COMMITTED, /* Successfully committed */
-    HAL_TXN_STATE_FAILED,    /* Commit failed, automatic rollback performed */
+    HAL_TXN_STATE_FAILED,    /* Commit/rollback failed; recovery may be pending */
     HAL_TXN_STATE_ABORTED    /* Aborted or rolled back */
 } hal_txn_state_t;
 
@@ -89,7 +90,7 @@ typedef enum hal_txn_state_e {
  */
 typedef struct hal_txn_opts_s {
     uint32_t timeout_ms;        /* Max transaction duration in ms (0 = no limit) */
-    bool     auto_rollback;     /* Auto-rollback on any error (default: true) */
+    bool     auto_rollback;     /* Attempt rollback on commit failure (default: true) */
 } hal_txn_opts_t;
 
 /**
@@ -255,13 +256,19 @@ hal_status_t hal_txn_add_route(hal_txn_t *txn, hal_txn_op_t op,
 /**
  * Add a route operation to the transaction
  *
- * All-or-nothing semantics:
+ * Atomicity semantics:
  * - If commit succeeds: all operations are persisted, no rollback needed
- * - If commit fails at any step: automatic rollback occurs (if auto_rollback=true),
- *   transaction moves to FAILED or ABORTED state, and error is returned
+ * - If commit fails: the operation error is returned and the transaction moves
+ *   to FAILED; rollback is attempted automatically when auto_rollback is true
+ * - If an inverse operation fails, the transaction remains FAILED and retains
+ *   unapplied rollback tracking; the caller must retry rollback/abort
+ * - If an inverse operation cannot be completed, atomicity cannot be guaranteed
  *
  * @param txn       Transaction handle (must be in PENDING or ACTIVE state)
  * @return          HAL_SUCCESS, HAL_E_RESOURCE, or error
+ *
+ * If auto_rollback is false, a failed commit retains locks and unapplied rollback
+ * tracking until hal_txn_rollback() or hal_txn_abort() is called.
  */
 hal_status_t hal_txn_commit(hal_txn_t *txn);
 
@@ -272,10 +279,10 @@ hal_status_t hal_txn_commit(hal_txn_t *txn);
  * Rollback is best-effort: if any inverse operation fails, an error is logged
  * but rollback continues with remaining operations.
  *
- * @param txn       Transaction handle (must be in ACTIVE or COMMITTED state)
- * @return          HAL_SUCCESS, HAL_E_NULL, or error
+ * @param txn       Transaction handle (must be in COMMITTED or FAILED state)
+ * @return          HAL_SUCCESS, HAL_E_NULL, or the first inverse-operation error
  *
- * @note Transaction enters ABORTED state after rollback completes.
+ * @note Transaction enters ABORTED state after rollback completes successfully.
  *       Resources are released back to pools.
  */
 hal_status_t hal_txn_rollback(hal_txn_t *txn);
@@ -289,11 +296,11 @@ hal_status_t hal_txn_rollback(hal_txn_t *txn);
  * but where explicit rollback is not needed.
  *
  * @param txn       Transaction handle (can be in any state except ABORTED)
- * @return          HAL_SUCCESS or error code
+ * @return          HAL_SUCCESS or error code, including an inverse-operation error
  *                  - HAL_E_NULL: txn is NULL
  *
- * @note Transaction enters ABORTED state.
- *       For ACTIVE transactions, attempts to rollback all applied ops.
+ * @note Transaction enters ABORTED state after cleanup succeeds.
+ *       For ACTIVE or FAILED transactions, attempts to rollback applied ops.
  */
 hal_status_t hal_txn_abort(hal_txn_t *txn);
 
@@ -302,9 +309,10 @@ hal_status_t hal_txn_abort(hal_txn_t *txn);
  * Free transaction resources
  *
  * Deallocates the transaction handle and all associated resources.
- * Must not be called on active transactions—use abort() or commit() first.
+ * Must not be called on ACTIVE or FAILED transactions—use abort()/rollback()
+ * first. PENDING, COMMITTED, and ABORTED handles may be freed.
  *
- * @param txn       Transaction handle (must be in COMMITTED or ABORTED state)
+ * @param txn       Transaction handle (must be in PENDING, COMMITTED, or ABORTED state)
  * @return          HAL_SUCCESS or error code
  *                  - HAL_E_NULL: txn is NULL
  *                  - HAL_E_BUSY: Transaction is still active

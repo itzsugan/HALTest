@@ -15,9 +15,9 @@
 #include "asic/asic_driver.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <pthread.h>
-#include <time.h>
 
 /* ============================================================================
  * Global Transaction State Variables
@@ -25,9 +25,14 @@
 static hal_txn_t		*gp_txn_list	  = NULL;
 static pthread_mutex_t 	g_txn_global_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t 		g_txn_next_id 	  = 1;
+static uint32_t         g_txn_count = 0;
+
+static hal_status_t lock_acquire_fdb(const hal_fdb_entry_t *entry,
+                                     uint64_t txn_id, uint32_t *lock_idx);
+static hal_status_t lock_acquire_route(const hal_route_entry_t *entry,
+                                       uint64_t txn_id, uint32_t *lock_idx);
 
 static txn_lock_manager_t g_txn_lock_mgr = {
-    .locks = {0}, 
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
 
@@ -71,12 +76,9 @@ static bool txn_check_timeout(hal_txn_t *txn)
         return false;
     }
 
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    uint64_t now_ms = (uint64_t)now.tv_sec * 1000UL + now.tv_nsec / 1000000;
-    uint64_t elapsed_ms = now_ms - txn->start_time;
+    uint64_t elapsed_us = hal_time_now() - txn->start_time;
     
-    return elapsed_ms > txn->opts.timeout_ms;
+    return elapsed_us >= (uint64_t)txn->opts.timeout_ms * 1000;
 }
 
 /* ============================================================================
@@ -130,7 +132,7 @@ static txn_entry_lock_t* find_entry_lock(hal_txn_table_t table, uint64_t key)
 }
 
 static hal_status_t allocate_entry_lock(hal_txn_table_t table, uint64_t key,
-											 uint32_t txn_id, uint32_t *lock_idx)
+											 uint64_t txn_id, uint32_t *lock_idx)
 {
 	txn_entry_lock_t *new_lock = NULL;
 
@@ -156,7 +158,7 @@ static hal_status_t allocate_entry_lock(hal_txn_table_t table, uint64_t key,
     return HAL_SUCCESS;
 }
 
-static void free_entry_lock(uint32_t lock_idx, uint32_t txn_id)
+static void free_entry_lock(uint32_t lock_idx, uint64_t txn_id)
 {
 	pthread_mutex_lock(&g_txn_lock_mgr.mutex);
 
@@ -177,10 +179,49 @@ static void txn_release_locks(hal_txn_t *txn)
 
     for (size_t i = 0; i < txn->entry_count; i++) {
         if (txn->entries[i].locked) {
-            free_entry_lock(txn->entries[i].lock_index, (uint32_t)txn->id);
+            free_entry_lock(txn->entries[i].lock_index, txn->id);
             txn->entries[i].locked = false;
         }
     }
+}
+
+static hal_status_t txn_acquire_missing_locks(hal_txn_t *txn)
+{
+    uint32_t acquired[TXN_MAX_ENTRY_CAPACITY];
+    size_t acquired_count = 0;
+
+    for (size_t i = 0; i < txn->entry_count; i++) {
+        hal_txn_op_entry_t *entry = &txn->entries[i];
+        if (entry->locked) {
+            continue;
+        }
+
+        hal_status_t rv;
+        if (entry->table == HAL_TXN_TABLE_FDB) {
+            rv = lock_acquire_fdb(&entry->entry.fdb, txn->id,
+                                  &entry->lock_index);
+        } else if (entry->table == HAL_TXN_TABLE_ROUTE) {
+            rv = lock_acquire_route(&entry->entry.route, txn->id,
+                                    &entry->lock_index);
+        } else {
+            rv = HAL_E_PARAM;
+        }
+
+        if (rv != HAL_SUCCESS) {
+            while (acquired_count > 0) {
+                hal_txn_op_entry_t *acquired_entry =
+                    &txn->entries[acquired[--acquired_count]];
+                free_entry_lock(acquired_entry->lock_index, txn->id);
+                acquired_entry->locked = false;
+            }
+            return rv;
+        }
+
+        entry->locked = true;
+        acquired[acquired_count++] = (uint32_t)i;
+    }
+
+    return HAL_SUCCESS;
 }
 
 
@@ -222,7 +263,7 @@ uint64_t get_route_key (const hal_route_entry_t *entry)
  * Acquire lock for FDB entry
  */
 static hal_status_t lock_acquire_fdb(const hal_fdb_entry_t *entry,
-                                     uint32_t txn_id, uint32_t *lock_idx)
+                                     uint64_t txn_id, uint32_t *lock_idx)
 {
 	txn_entry_lock_t *cur_lock 	= NULL;
     uint64_t 		  key 		= 0;
@@ -259,7 +300,7 @@ static hal_status_t lock_acquire_fdb(const hal_fdb_entry_t *entry,
  * Acquire lock for FDB entry
  */
 static hal_status_t lock_acquire_route(const hal_route_entry_t *entry,
-                                     uint32_t txn_id, uint32_t *lock_idx)
+                                     uint64_t txn_id, uint32_t *lock_idx)
 {
 	txn_entry_lock_t *cur_lock 	= NULL;
     uint64_t 		  key 		= 0;
@@ -421,10 +462,13 @@ static hal_status_t txn_do_rollback(hal_txn_t *txn)
     if (!txn) {
 		return HAL_E_NULL;
 	}
-    
-    /* Rollback in reverse order */
-    for (int i = (int)txn->applied_count - 1; i >= 0; i--) {
-        hal_txn_op_entry_t *op_entry = &txn->entries[i];
+
+    hal_status_t first_error = HAL_SUCCESS;
+
+    /* Roll back every still-applied operation in reverse order. */
+    for (size_t i = txn->entry_count; i > 0; i--) {
+        size_t entry_index = i - 1;
+        hal_txn_op_entry_t *op_entry = &txn->entries[entry_index];
 
         if (!op_entry->applied) {
             continue;
@@ -446,11 +490,16 @@ static hal_status_t txn_do_rollback(hal_txn_t *txn)
         if (rv == HAL_SUCCESS) {
 			op_entry->applied = false;
 			txn->applied_count--;
+        } else {
+            fprintf(stderr, "hal_txn: rollback failed for operation %zu: %s\n",
+                    entry_index, hal_status_str(rv));
+            if (first_error == HAL_SUCCESS) {
+                first_error = rv;
+            }
 		}
     }
 
-    txn->applied_count = 0;
-    return HAL_SUCCESS;
+    return first_error;
 }
 
 
@@ -502,6 +551,7 @@ hal_status_t hal_txn_begin(const hal_txn_opts_t *opts, hal_txn_t **txn)
     if (!txn) {
 		return HAL_E_NULL;
 	}
+    *txn = NULL;
 
     hal_txn_t *new_txn = calloc(1, sizeof(hal_txn_t));
     if (!new_txn) {
@@ -515,15 +565,7 @@ hal_status_t hal_txn_begin(const hal_txn_opts_t *opts, hal_txn_t **txn)
         return HAL_E_MEMORY;
     }
     
-    /* Get current time for timeout tracking */
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    new_txn->start_time = (uint64_t)ts.tv_sec * 1000UL + ts.tv_nsec / 1000000;
-    
-    /* Assign unique transaction ID */
-    pthread_mutex_lock(&g_txn_global_lock);
-    new_txn->id = g_txn_next_id++;
-    pthread_mutex_unlock(&g_txn_global_lock);
+    new_txn->start_time = hal_time_now();
     
     /* Set options */
     if (opts) {
@@ -537,14 +579,25 @@ hal_status_t hal_txn_begin(const hal_txn_opts_t *opts, hal_txn_t **txn)
     new_txn->entry_count 	= 0;
     new_txn->state 			= HAL_TXN_STATE_PENDING;
 
-	/* Add transaction to TXN list */
+    /* Keep allocation outside the global lock; protect shared registry updates. */
     pthread_mutex_lock(&g_txn_global_lock);
+    if (g_txn_count >= TXN_MAX_CONCURRENT_TRANSACTIONS) {
+        pthread_mutex_unlock(&g_txn_global_lock);
+        free(new_txn->entries);
+        free(new_txn);
+        return HAL_E_RESOURCE;
+    }
+
+    new_txn->id = g_txn_next_id++;
+
+	/* Add transaction to TXN list */
 	if (gp_txn_list != NULL) {
 		gp_txn_list->prev = new_txn;
 	}
 	new_txn->next 	= gp_txn_list;
 	gp_txn_list 	= new_txn;
-    pthread_mutex_unlock(&g_txn_global_lock);
+	g_txn_count++;
+	pthread_mutex_unlock(&g_txn_global_lock);
 
     *txn = new_txn;
     return HAL_SUCCESS;
@@ -581,7 +634,7 @@ hal_status_t hal_txn_add_fdb(hal_txn_t *txn, hal_txn_op_t op,
     }
     
     uint32_t lock_idx = 0;
-    rv = lock_acquire_fdb(entry, (uint32_t)txn->id, &lock_idx);
+    rv = lock_acquire_fdb(entry, txn->id, &lock_idx);
     if (rv != HAL_SUCCESS) {
         return rv;
     }
@@ -600,7 +653,7 @@ hal_status_t hal_txn_add_fdb(hal_txn_t *txn, hal_txn_op_t op,
 		hal_fdb_entry_t old_entry;
         rv = hal_fdb_get(entry->mac, entry->vlan_id, &old_entry);
 		if (rv != HAL_SUCCESS) {
-			free_entry_lock(lock_idx, (uint32_t)txn->id);
+			free_entry_lock(lock_idx, txn->id);
 			op_entry->locked = false;
 			return rv;
 		}
@@ -658,7 +711,7 @@ hal_status_t hal_txn_add_route(hal_txn_t *txn, hal_txn_op_t op,
     }
     
     uint32_t lock_idx = 0;
-    rv = lock_acquire_route(entry, (uint32_t)txn->id, &lock_idx);
+    rv = lock_acquire_route(entry, txn->id, &lock_idx);
     if (rv != HAL_SUCCESS) {
         return rv;
     }
@@ -680,7 +733,7 @@ hal_status_t hal_txn_add_route(hal_txn_t *txn, hal_txn_op_t op,
 						   entry->prefix_len,
 						   &old_entry);
 		if (rv != HAL_SUCCESS) {
-			free_entry_lock(lock_idx, (uint32_t)txn->id);
+			free_entry_lock(lock_idx, txn->id);
 			op_entry->locked = false;
 			return rv;
 		}
@@ -722,6 +775,10 @@ hal_status_t hal_txn_commit(hal_txn_t *txn)
         return HAL_E_FAIL;
     }
 
+    if (txn_check_timeout(txn)) {
+        return HAL_E_TIMEOUT;
+    }
+
     txn_transition_state(txn, HAL_TXN_STATE_ACTIVE);
     
     /* Step 1: Count & Reserve resource requirements */
@@ -735,26 +792,34 @@ hal_status_t hal_txn_commit(hal_txn_t *txn)
     for (size_t i = 0; i < txn->entry_count; i++) {
         hal_txn_op_entry_t *op_entry = &txn->entries[i];
 
-		switch(op_entry->table) {
-			case HAL_TXN_TABLE_FDB:
-				rv = apply_fdb_operation(op_entry);
-				break;
-			case HAL_TXN_TABLE_ROUTE:
-				rv = apply_route_operation(op_entry);
-				break;
-			default:
-				rv = HAL_E_PARAM;
-				break;
-		}
+        if (txn_check_timeout(txn)) {
+            rv = HAL_E_TIMEOUT;
+        } else {
+            switch (op_entry->table) {
+                case HAL_TXN_TABLE_FDB:
+                    rv = apply_fdb_operation(op_entry);
+                    break;
+                case HAL_TXN_TABLE_ROUTE:
+                    rv = apply_route_operation(op_entry);
+                    break;
+                default:
+                    rv = HAL_E_PARAM;
+                    break;
+            }
+        }
         
         if (rv != HAL_SUCCESS) {
             /* Operation failed - rollback applied operations */
-            txn->applied_count = i;
-            
             if (txn->opts.auto_rollback) {
-                txn_do_rollback(txn);
-				txn_release_locks(txn);
-				hal_txn_unreserve(txn);
+                hal_status_t rollback_rv = txn_do_rollback(txn);
+                if (rollback_rv == HAL_SUCCESS) {
+                    txn_release_locks(txn);
+                    hal_txn_unreserve(txn);
+                } else {
+                    fprintf(stderr,
+                            "hal_txn: commit failed (%s), rollback incomplete (%s)\n",
+                            hal_status_str(rv), hal_status_str(rollback_rv));
+                }
             }
 			txn_transition_state(txn, HAL_TXN_STATE_FAILED);
 			return rv;
@@ -782,7 +847,18 @@ hal_status_t hal_txn_rollback(hal_txn_t *txn)
     }
 
     if (txn->applied_count > 0) {
-        txn_do_rollback(txn);
+        hal_status_t lock_rv = txn_acquire_missing_locks(txn);
+        if (lock_rv != HAL_SUCCESS) {
+            return lock_rv;
+        }
+
+        hal_status_t rv = txn_do_rollback(txn);
+        if (rv != HAL_SUCCESS) {
+            fprintf(stderr, "hal_txn: rollback incomplete (%s)\n",
+                    hal_status_str(rv));
+            txn_transition_state(txn, HAL_TXN_STATE_FAILED);
+            return rv;
+        }
     }
     
     txn_release_locks(txn);
@@ -812,7 +888,18 @@ hal_status_t hal_txn_abort(hal_txn_t *txn)
     }
 
     if (txn->applied_count > 0) {
-        txn_do_rollback(txn);
+        hal_status_t lock_rv = txn_acquire_missing_locks(txn);
+        if (lock_rv != HAL_SUCCESS) {
+            return lock_rv;
+        }
+
+        hal_status_t rv = txn_do_rollback(txn);
+        if (rv != HAL_SUCCESS) {
+            fprintf(stderr, "hal_txn: abort rollback incomplete (%s)\n",
+                    hal_status_str(rv));
+            txn_transition_state(txn, HAL_TXN_STATE_FAILED);
+            return rv;
+        }
     }
 
     txn_release_locks(txn);
@@ -828,8 +915,7 @@ hal_status_t hal_txn_free(hal_txn_t *txn)
 
 	if (txn->state != HAL_TXN_STATE_PENDING &&
 		txn->state != HAL_TXN_STATE_COMMITTED &&
-		txn->state != HAL_TXN_STATE_ABORTED &&
-		txn->state != HAL_TXN_STATE_FAILED) {
+		txn->state != HAL_TXN_STATE_ABORTED) {
 		return HAL_E_BUSY;
 	}
 
@@ -848,6 +934,9 @@ hal_status_t hal_txn_free(hal_txn_t *txn)
     }
     if (txn->next != NULL) {
         txn->next->prev = txn->prev;
+    }
+    if (g_txn_count > 0) {
+        g_txn_count--;
     }
     pthread_mutex_unlock(&g_txn_global_lock);
 

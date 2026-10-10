@@ -140,13 +140,11 @@ This implementation uses Option A: pessimistic locking.
 
 - Lock granularity is per-entry, not per-table or global.
 - FDB keys are MAC + VLAN; route keys are VRF + prefix + prefix length.
-- A lock is acquired when an operation is added to the transaction and released when the transaction ends (commit, rollback, or abort).
+- A lock is acquired immediately when an operation is added and released after commit, successful rollback, or abort. A failed add releases only its newly acquired lock and leaves the transaction's prior state and journal unchanged.
 
-This prevents concurrent transactions from mutating the same key simultaneously. Deadlock risk is low because all transactions acquire at most one lock per entry and release them promptly at the end of the transaction. In practice, lock acquisition is ordered by the natural table/key ordering before commit to keep the path deterministic.
+This prevents transaction-managed operations from taking the same key concurrently. Direct FDB/route API calls do not use this lock manager and therefore are not coordinated by transaction locks. Acquisition is in add-operation order and fails immediately with `HAL_E_BUSY`; it does not wait. This avoids wait-cycle deadlocks, but a transaction may hold earlier locks while a later add returns busy.
 
- [-] Why optimistic is not used in design:
-       - Optimistic locking detects conflicts at the last stage (commit) which requires rollback of all previous entries.
-	     In HAL, since asic programming is costly/expensive operation, blocking conflicting operation is more efficient than detecting at last and rolling back.
+Optimistic locking was not selected because it discovers conflicts at commit, potentially after ASIC operations have been applied and need to be undone. Pessimistic locking avoids that late conflict path, at the cost of holding locks while a transaction is being assembled.
 
 ## 3. Failure Handling
 
@@ -156,39 +154,37 @@ Transaction safety is enforced with inverse operations:
 - `DELETE` -> `ADD` using the saved original snapshot
 - `UPDATE` -> `UPDATE` using the saved original values
 
-Rollback is best-effort: it runs in reverse order and continues if a single inverse operation fails. The transaction then releases locks and returns the failed status to the caller.
+Rollback is best-effort: it runs in reverse order, logs inverse-operation failures, continues attempting the remaining inverses, and returns the first rollback error. Operations that could not be undone remain marked as applied so rollback/abort can be retried. Locks are retained while rollback remains incomplete; commit-time resource reservations are also retained if automatic rollback of a failed commit is incomplete.
 
-If the ASIC driver times out or a table operation fails during commit, the transaction is marked `FAILED`, previously applied operations are undone, and any reserved resources are released when auto_rollback is true. When auto_rollback is false, Applications should then call `hal_txn_rollback()` or `hal_txn_abort()` to finalize cleanup.
+If the ASIC driver or a table operation fails during commit, the transaction is marked `FAILED`. With `auto_rollback=true`, the manager attempts to undo applied operations; locks and reservations are released only if that rollback succeeds. With `auto_rollback=false`, applied work, locks, and reservations are retained until the caller invokes `hal_txn_rollback()` or `hal_txn_abort()`. Those calls return a rollback error and leave the transaction FAILED if any inverse still fails. The original commit error is returned from `hal_txn_commit()`; rollback errors are logged.
 
+If resource pre-validation fails, no table operation has been applied; reservations are cleared and the ACTIVE transaction retains its entry locks so it can be retried or aborted.
 
+The configured duration timeout is checked when adding an operation, before commit begins, and between commit operations. Expiry prevents further application and triggers the configured rollback behavior; staged operations and locks are not silently discarded. The caller must abort the transaction if commit has not started or finish rollback after a timed-out commit. Lock conflicts do not wait and are returned as `HAL_E_BUSY`.
 
 ## 4. Scale Considerations
 
-- Maximum concurrent transactions is bounded by the operation journal capacity and lock table size (TXN_LOCK_TABLE_SIZE).
+- At most 1,024 live transaction handles are admitted; each transaction can hold up to 256 operations. The 8,192 lock slots bound simultaneously held entry locks, not transaction count.
 - Memory overhead is modest.
-	* Each journal entry stores a compact operation record, entry info plus a snapshot for UPDATE/DELETE.
-	* The memory cost is roughly the size of two entry unions per operation, not just the operation being performed.
+	* Each live transaction preallocates 16 journal entries and grows up to 256.
+	* Each journal entry contains both an entry union and an original-state union, even when the operation does not need a snapshot.
+	* This gives a bounded worst-case journal size per transaction; the total bound is set by the live transaction limit.
 - Resource reservation happens before commit
-	* This tries to ensure capacity before applying changes, reducing the risk of a transaction running out of resources midway
-	* The implementation reserves based on the number of ADD operations; it does not currently net those against DELETE operations in the same transaction.
+	* This reduces the risk of running out of resource-pool capacity partway through commit.
+	* Reservation counts ADD operations and does not net them against DELETE operations in the same transaction, so it can conservatively reject a batch that would fit after deletes.
 - This is suitable for single-node control-plane use; high-scale multi-node or distributed transactions are out of scope.
-- Lock table doesnt scale well
-	* the current implementation scans a fixed array to find and check locks, so lock lookup and allocation are linear in the table size.
-	* Alternate option:
-		- Hash --> Hash collisions will lead to incorrect conflict.
-		- RB Tree would be a better choice, can support faster (table + logical key) based lookups.
+- The fixed lock array is scanned linearly for conflict checks and free slots. A hash table can improve expected lookup time when collisions are resolved with key equality; a balanced tree provides predictable logarithmic lookup at greater implementation cost.
 
 ## 5. Trade-offs and Future Work
 
 Chosen not to implement:
-- global transaction lock for simplicity and performance
-- optimistic concurrency is not choosen since it detects conflicts during commit which may need rollback.
-	* Lock table coordinates only transaction managed operations. Direct table API calls do not use the lock table.
-	* So current design doesnt block those calls by lock table.
-- distributed transactions or multi-device coordination - simpler scope.
-- Lock table is not chosen to implemente with advanced data structures due to time limitation.
+- A global transaction lock, which would serialize operations on unrelated keys.
+- Optimistic concurrency, because late conflict detection can require undoing applied ASIC changes.
+- Distributed transactions or multi-device coordination, which exceed this HAL's single-process scope.
+- A hash/tree lock index, to keep the initial implementation simple and bounded.
 
 Future improvements:
-- timeout-aware waiting for conflicting entries instead of immediate busy-fail
-- distributed transactions or multi-device coordination.
-- Lock table can be implemented with RB tree for better scale and performance.
+- Add timeout-aware waiting for conflicting entries; currently conflicts return `HAL_E_BUSY` immediately.
+- Add distributed transactions or multi-device coordination if the system requires cross-device atomicity.
+- Replace the linear lock-array scans with a collision-safe hash table or balanced tree if profiling shows contention/lookup cost is material.
+- Add aggregate timing, contention, reservation, and rollback-failure metrics.
